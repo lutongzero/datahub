@@ -3,7 +3,7 @@ import logging
 import re
 from dataclasses import dataclass, field
 from datetime import datetime
-from typing import Any, ClassVar, Dict, List, Optional, Pattern, Set, Tuple
+from typing import Any, ClassVar, Dict, List, Optional, Pattern, Tuple, Union
 
 from dateutil import parser
 
@@ -12,56 +12,7 @@ from datahub.utilities.parsing_util import (
     get_first_missing_key,
     get_first_missing_key_any,
 )
-
-BQ_AUDIT_V2 = {
-    "BQ_FILTER_REGEX_ALLOW_TEMPLATE": """protoPayload.metadata.jobChange.job.jobStats.queryStats.referencedTables =~ "projects/.*/datasets/.*/tables/{table_allow_pattern}"
-""".strip(
-        "\t \n"
-    ),
-    "BQ_FILTER_REGEX_DENY_TEMPLATE": """
-    {logical_operator}
-            NOT (
-                protoPayload.metadata.jobChange.job.jobStats.queryStats.referencedTables =~ "projects/.*/datasets/.*/tables/{table_deny_pattern}"
-            )
-""".strip(
-        "\t \n"
-    ),
-    "BQ_FILTER_RULE_TEMPLATE": """
-resource.type=("bigquery_project" OR "bigquery_dataset")
-AND
-(
-    (
-        protoPayload.methodName=
-            (
-                "google.cloud.bigquery.v2.JobService.Query"
-                OR
-                "google.cloud.bigquery.v2.JobService.InsertJob"
-            )
-        AND
-        protoPayload.metadata.jobChange.job.jobStatus.jobState="DONE"
-        AND NOT protoPayload.metadata.jobChange.job.jobStatus.errorResult:*
-        AND protoPayload.metadata.jobChange.job.jobStats.queryStats.referencedTables:*
-        AND NOT protoPayload.metadata.jobChange.job.jobStats.queryStats.referencedTables =~ "projects/.*/datasets/.*/tables/__TABLES__|__TABLES_SUMMARY__|INFORMATION_SCHEMA.*"
-         AND (
-            {allow_regex}
-            {deny_regex}
-         OR
-            protoPayload.metadata.tableDataRead.reason = "JOB"
-        )
-    )
-    OR
-    (
-        protoPayload.metadata.tableDataRead:*
-    )
-)
-AND
-timestamp >= "{start_time}"
-AND
-timestamp < "{end_time}"
-""".strip(
-        "\t \n"
-    ),
-}
+from datahub.utilities.urns.dataset_urn import DatasetUrn
 
 AuditLogEntry = Any
 
@@ -70,6 +21,14 @@ BigQueryAuditMetadata = Any
 
 logger: logging.Logger = logging.getLogger(__name__)
 
+# Regexp for sharded tables.
+# A sharded table is a table that has a suffix of the form _yyyymmdd or yyyymmdd, where yyyymmdd is a date.
+# The regexp checks for valid dates in the suffix (e.g. 20200101, 20200229, 20201231) and if the date is not valid
+# then it is not a sharded table.
+_BIGQUERY_DEFAULT_SHARDED_TABLE_REGEX = (
+    "((.+\\D)[_$]?)?(\\d\\d\\d\\d(?:0[1-9]|1[0-2])(?:0[1-9]|[12][0-9]|3[01]))$"
+)
+
 
 @dataclass(frozen=True, order=True)
 class BigqueryTableIdentifier:
@@ -77,70 +36,101 @@ class BigqueryTableIdentifier:
     dataset: str
     table: str
 
-    invalid_chars: ClassVar[Set[str]] = {"$", "@"}
-    _BIGQUERY_DEFAULT_SHARDED_TABLE_REGEX: ClassVar[str] = "((.+)[_$])?(\\d{8})$"
+    # Note: this regex may get overwritten by the sharded_table_pattern config.
+    # The class-level constant, however, will not be overwritten.
+    _BIGQUERY_DEFAULT_SHARDED_TABLE_REGEX: ClassVar[
+        str
+    ] = _BIGQUERY_DEFAULT_SHARDED_TABLE_REGEX
     _BIGQUERY_WILDCARD_REGEX: ClassVar[str] = "((_(\\d+)?)\\*$)|\\*$"
     _BQ_SHARDED_TABLE_SUFFIX: str = "_yyyymmdd"
 
     @staticmethod
-    def get_table_and_shard(table_name: str) -> Tuple[str, Optional[str]]:
-        match = re.search(
+    def get_table_and_shard(table_name: str) -> Tuple[Optional[str], Optional[str]]:
+        """
+        Args:
+            table_name:
+                table name (in form <table-id> or <table-prefix>_<shard>`, optionally prefixed with <project-id>.<dataset-id>)
+                See https://cloud.google.com/bigquery/docs/reference/standard-sql/wildcard-table-reference
+                If table_name is fully qualified, i.e. prefixed with <project-id>.<dataset-id> then the special case of
+                dataset as a sharded table, i.e. table-id itself as shard can not be detected.
+        Returns:
+            (table_name_without_shard, shard):
+                In case of non-sharded tables, returns (<table-id>, None)
+                In case of sharded tables, returns (<table-prefix>, shard)
+        """
+        new_table_name = table_name
+        match = re.match(
             BigqueryTableIdentifier._BIGQUERY_DEFAULT_SHARDED_TABLE_REGEX,
             table_name,
             re.IGNORECASE,
         )
         if match:
-            table_name = match.group(2)
-            shard = match.group(3)
-            return table_name, shard
-        return table_name, None
+            shard: str = match[3]
+            if shard:
+                if table_name.endswith(shard):
+                    new_table_name = table_name[: -len(shard)]
+
+            new_table_name = (
+                new_table_name.rstrip("_") if new_table_name else new_table_name
+            )
+            if new_table_name.endswith("."):
+                new_table_name = table_name
+            return (new_table_name, shard) if new_table_name else (None, shard)
+        return new_table_name, None
 
     @classmethod
     def from_string_name(cls, table: str) -> "BigqueryTableIdentifier":
         parts = table.split(".")
-        return cls(parts[0], parts[1], parts[2])
+        # If the table name contains dollar sign, it is a referrence to a partitioned table and we have to strip it
+        table = parts[2].split("$", 1)[0]
+        return cls(parts[0], parts[1], table)
 
     def raw_table_name(self):
         return f"{self.project_id}.{self.dataset}.{self.table}"
 
     def get_table_display_name(self) -> str:
-        shortened_table_name = self.table
-        # if table name ends in _* or * then we strip it as that represents a query on a sharded table
-        shortened_table_name = re.sub(
-            self._BIGQUERY_WILDCARD_REGEX, "", shortened_table_name
-        )
+        """
+        Returns table display name to be used for DataHub
+            - removes shard suffix (table_yyyymmdd-> table)
+            - removes wildcard part (table_yyyy* -> table)
+            - remove time decorator (table@1624046611000 -> table)
+            - removes partition ids (table$20210101 -> table or table$__UNPARTITIONED__ -> table)
+        """
+        # if table name ends in _* or * or _yyyy* or _yyyymm* then we strip it as that represents a query on a sharded table
+        shortened_table_name = re.sub(self._BIGQUERY_WILDCARD_REGEX, "", self.table)
+
+        matches = BigQueryTableRef.SNAPSHOT_TABLE_REGEX.match(shortened_table_name)
+        if matches:
+            shortened_table_name = matches.group(1)
+            logger.debug(
+                f"Found table snapshot. Using {shortened_table_name} as the table name."
+            )
+
+        if "$" in shortened_table_name:
+            shortened_table_name = shortened_table_name.split("$", maxsplit=1)[0]
+            logger.debug(
+                f"Found partitioned table. Using {shortened_table_name} as the table name."
+            )
 
         table_name, _ = self.get_table_and_shard(shortened_table_name)
-        if not table_name:
-            table_name = self.dataset
-
-        matches = BigQueryTableRef.SNAPSHOT_TABLE_REGEX.match(table_name)
-        if matches:
-            table_name = matches.group(1)
-            logger.debug(f"Found table snapshot. Using {table_name} as the table name.")
-
-        # Handle exceptions
-        invalid_chars_in_table_name: List[str] = [
-            c for c in self.invalid_chars if c in table_name
-        ]
-        if invalid_chars_in_table_name:
-            raise ValueError(
-                f"Cannot handle {self.raw_table_name()} - poorly formatted table name, contains {invalid_chars_in_table_name}"
-            )
-        return table_name
+        return table_name or self.dataset
 
     def get_table_name(self) -> str:
+        """
+        Returns qualified table name to be used for DataHub
+            - removes shard suffix (table_yyyymmdd-> table)
+            - removes wildcard part (table_yyyy* -> table)
+            - remove time decorator (table@1624046611000 -> table)
+        """
         table_name: str = (
             f"{self.project_id}.{self.dataset}.{self.get_table_display_name()}"
         )
         if self.is_sharded_table():
-            table_name = (
-                f"{table_name}{BigqueryTableIdentifier._BQ_SHARDED_TABLE_SUFFIX}"
-            )
+            table_name += BigqueryTableIdentifier._BQ_SHARDED_TABLE_SUFFIX
         return table_name
 
     def is_sharded_table(self) -> bool:
-        _, shard = self.get_table_and_shard(self.raw_table_name())
+        _, shard = self.get_table_and_shard(self.table)
         if shard:
             return True
 
@@ -159,9 +149,11 @@ class BigqueryTableIdentifier:
 
 @dataclass(frozen=True, order=True)
 class BigQueryTableRef:
-    # Handle table snapshots
-    # See https://cloud.google.com/bigquery/docs/table-snapshots-intro.
-    SNAPSHOT_TABLE_REGEX: ClassVar[Pattern[str]] = re.compile(r"^(.+)@(\d{13})$")
+    # Handle table time travel. See https://cloud.google.com/bigquery/docs/time-travel
+    # See https://cloud.google.com/bigquery/docs/table-decorators#time_decorators
+    SNAPSHOT_TABLE_REGEX: ClassVar[Pattern[str]] = re.compile(
+        "^(.+)@(-?\\d{1,13})(-(-?\\d{1,13})?)?$"
+    )
 
     table_identifier: BigqueryTableIdentifier
 
@@ -178,7 +170,7 @@ class BigQueryTableRef:
                 raise ValueError(f"invalid BigQuery table reference dict: {spec}")
 
         return cls(
-            # spec dict always has to have projectId, datasetId, tableId otherwise it is an ivalid spec
+            # spec dict always has to have projectId, datasetId, tableId otherwise it is an invalid spec
             BigqueryTableIdentifier(
                 spec["projectId"], spec["datasetId"], spec["tableId"]
             )
@@ -195,6 +187,17 @@ class BigQueryTableRef:
         ):
             raise ValueError(f"invalid BigQuery table reference: {ref}")
         return cls(BigqueryTableIdentifier(parts[1], parts[3], parts[5]))
+
+    @classmethod
+    def from_urn(cls, urn: str) -> "BigQueryTableRef":
+        """Raises: ValueError if urn is not a valid BigQuery table URN."""
+        dataset_urn = DatasetUrn.create_from_string(urn)
+        split = dataset_urn.get_dataset_name().rsplit(".", 3)
+        if len(split) == 3:
+            project, dataset, table = split
+        else:
+            _, project, dataset, table = split
+        return cls(BigqueryTableIdentifier(project, dataset, table))
 
     def is_temporary_table(self, prefixes: List[str]) -> bool:
         for prefix in prefixes:
@@ -245,6 +248,8 @@ class QueryEvent:
     billed_bytes: Optional[int] = None
     default_dataset: Optional[str] = None
     numAffectedRows: Optional[int] = None
+
+    query_on_view: bool = False
 
     @staticmethod
     def get_missing_key_entry(entry: AuditLogEntry) -> Optional[str]:
@@ -309,7 +314,7 @@ class QueryEvent:
         if raw_dest_table:
             query_event.destinationTable = BigQueryTableRef.from_spec_obj(
                 raw_dest_table
-            )
+            ).get_sanitized_table_ref()
         # statementType
         # referencedTables
         job_stats: Dict = job["jobStatistics"]
@@ -319,14 +324,18 @@ class QueryEvent:
         raw_ref_tables = job_stats.get("referencedTables")
         if raw_ref_tables:
             query_event.referencedTables = [
-                BigQueryTableRef.from_spec_obj(spec) for spec in raw_ref_tables
+                BigQueryTableRef.from_spec_obj(spec).get_sanitized_table_ref()
+                for spec in raw_ref_tables
             ]
         # referencedViews
         raw_ref_views = job_stats.get("referencedViews")
         if raw_ref_views:
             query_event.referencedViews = [
-                BigQueryTableRef.from_spec_obj(spec) for spec in raw_ref_views
+                BigQueryTableRef.from_spec_obj(spec).get_sanitized_table_ref()
+                for spec in raw_ref_views
             ]
+            query_event.query_on_view = True
+
         # payload
         query_event.payload = entry.payload if debug_include_full_payloads else None
         if not query_event.job_name:
@@ -388,19 +397,23 @@ class QueryEvent:
         if raw_dest_table:
             query_event.destinationTable = BigQueryTableRef.from_string_name(
                 raw_dest_table
-            )
+            ).get_sanitized_table_ref()
         # referencedTables
         raw_ref_tables = query_stats.get("referencedTables")
         if raw_ref_tables:
             query_event.referencedTables = [
-                BigQueryTableRef.from_string_name(spec) for spec in raw_ref_tables
+                BigQueryTableRef.from_string_name(spec).get_sanitized_table_ref()
+                for spec in raw_ref_tables
             ]
         # referencedViews
         raw_ref_views = query_stats.get("referencedViews")
         if raw_ref_views:
             query_event.referencedViews = [
-                BigQueryTableRef.from_string_name(spec) for spec in raw_ref_views
+                BigQueryTableRef.from_string_name(spec).get_sanitized_table_ref()
+                for spec in raw_ref_views
             ]
+            query_event.query_on_view = True
+
         # payload
         query_event.payload = payload if debug_include_full_payloads else None
 
@@ -452,20 +465,24 @@ class QueryEvent:
         if raw_dest_table:
             query_event.destinationTable = BigQueryTableRef.from_string_name(
                 raw_dest_table
-            )
+            ).get_sanitized_table_ref()
         # statementType
         # referencedTables
         raw_ref_tables = query_stats.get("referencedTables")
         if raw_ref_tables:
             query_event.referencedTables = [
-                BigQueryTableRef.from_string_name(spec) for spec in raw_ref_tables
+                BigQueryTableRef.from_string_name(spec).get_sanitized_table_ref()
+                for spec in raw_ref_tables
             ]
         # referencedViews
         raw_ref_views = query_stats.get("referencedViews")
         if raw_ref_views:
             query_event.referencedViews = [
-                BigQueryTableRef.from_string_name(spec) for spec in raw_ref_views
+                BigQueryTableRef.from_string_name(spec).get_sanitized_table_ref()
+                for spec in raw_ref_views
             ]
+            query_event.query_on_view = True
+
         # payload
         query_event.payload = payload if debug_include_full_payloads else None
 
@@ -497,6 +514,8 @@ class ReadEvent:
     jobName: Optional[str]
 
     payload: Any
+
+    from_query: bool = False
 
     # We really should use composition here since the query isn't actually
     # part of the read event, but this solution is just simpler.
@@ -541,10 +560,14 @@ class ReadEvent:
         if readReason == "JOB":
             jobName = readInfo.get("jobName")
 
+        resource = BigQueryTableRef.from_string_name(
+            resourceName
+        ).get_sanitized_table_ref()
+
         readEvent = ReadEvent(
             actor_email=user,
             timestamp=entry.timestamp,
-            resource=BigQueryTableRef.from_string_name(resourceName),
+            resource=resource,
             fieldsRead=fields,
             readReason=readReason,
             jobName=jobName,
@@ -556,6 +579,24 @@ class ReadEvent:
                 "Auditlog entry - {logEntry}".format(logEntry=entry)
             )
         return readEvent
+
+    @classmethod
+    def from_query_event(
+        cls,
+        read_resource: BigQueryTableRef,
+        query_event: QueryEvent,
+        debug_include_full_payloads: bool = False,
+    ) -> "ReadEvent":
+        return ReadEvent(
+            actor_email=query_event.actor_email,
+            timestamp=query_event.timestamp,
+            resource=read_resource,
+            fieldsRead=[],
+            readReason="JOB",
+            jobName=query_event.job_name,
+            payload=query_event.payload if debug_include_full_payloads else None,
+            from_query=True,
+        )
 
     @classmethod
     def from_exported_bigquery_audit_metadata(
@@ -575,10 +616,14 @@ class ReadEvent:
         if readReason == "JOB":
             jobName = readInfo.get("jobName")
 
+        resource = BigQueryTableRef.from_string_name(
+            resourceName
+        ).get_sanitized_table_ref()
+
         readEvent = ReadEvent(
             actor_email=user,
             timestamp=row["timestamp"],
-            resource=BigQueryTableRef.from_string_name(resourceName),
+            resource=resource,
             fieldsRead=fields,
             readReason=readReason,
             jobName=jobName,
@@ -596,3 +641,12 @@ class ReadEvent:
 class AuditEvent:
     read_event: Optional[ReadEvent] = None
     query_event: Optional[QueryEvent] = None
+
+    @classmethod
+    def create(cls, event: Union[ReadEvent, QueryEvent]) -> "AuditEvent":
+        if isinstance(event, QueryEvent):
+            return AuditEvent(query_event=event)
+        elif isinstance(event, ReadEvent):
+            return AuditEvent(read_event=event)
+        else:
+            raise TypeError(f"Cannot create AuditEvent: {event}")

@@ -10,14 +10,14 @@ import { GenericEntityProperties } from '../shared/types';
 import { SchemaTab } from '../shared/tabs/Dataset/Schema/SchemaTab';
 import GlossaryRelatedEntity from './profile/GlossaryRelatedEntity';
 import GlossayRelatedTerms from './profile/GlossaryRelatedTerms';
-import { SidebarOwnerSection } from '../shared/containers/profile/sidebar/Ownership/SidebarOwnerSection';
+import { SidebarOwnerSection } from '../shared/containers/profile/sidebar/Ownership/sidebar/SidebarOwnerSection';
 import { PropertiesTab } from '../shared/tabs/Properties/PropertiesTab';
 import { DocumentationTab } from '../shared/tabs/Documentation/DocumentationTab';
 import { SidebarAboutSection } from '../shared/containers/profile/sidebar/AboutSection/SidebarAboutSection';
-import GlossaryEntitiesPath from '../../glossary/GlossaryEntitiesPath';
 import { EntityMenuItems } from '../shared/EntityDropdown/EntityDropdown';
 import { EntityActionItem } from '../shared/entity/EntityActions';
 import { SidebarDomainSection } from '../shared/containers/profile/sidebar/Domain/SidebarDomainSection';
+import { PageRoutes } from '../../../conf/Global';
 
 /**
  * Definition of the DataHub Dataset entity.
@@ -58,6 +58,10 @@ export class GlossaryTermEntity implements Entity<GlossaryTerm> {
 
     getEntityName = () => 'Glossary Term';
 
+    useEntityQuery = useGetGlossaryTermQuery;
+
+    getCustomCardUrlPath = () => PageRoutes.GLOSSARY;
+
     renderProfile = (urn) => {
         return (
             <EntityProfile
@@ -66,10 +70,15 @@ export class GlossaryTermEntity implements Entity<GlossaryTerm> {
                 useEntityQuery={useGetGlossaryTermQuery as any}
                 headerActionItems={new Set([EntityActionItem.BATCH_ADD_GLOSSARY_TERM])}
                 headerDropdownItems={
-                    new Set([EntityMenuItems.UPDATE_DEPRECATION, EntityMenuItems.MOVE, EntityMenuItems.DELETE])
+                    new Set([
+                        EntityMenuItems.UPDATE_DEPRECATION,
+                        EntityMenuItems.CLONE,
+                        EntityMenuItems.MOVE,
+                        EntityMenuItems.DELETE,
+                    ])
                 }
-                displayGlossaryBrowser
                 isNameEditable
+                hideBrowseBar
                 tabs={[
                     {
                         name: 'Documentation',
@@ -101,25 +110,26 @@ export class GlossaryTermEntity implements Entity<GlossaryTerm> {
                         component: PropertiesTab,
                     },
                 ]}
-                sidebarSections={[
-                    {
-                        component: SidebarAboutSection,
-                    },
-                    {
-                        component: SidebarOwnerSection,
-                    },
-                    {
-                        component: SidebarDomainSection,
-                        properties: {
-                            hideOwnerType: true,
-                        },
-                    },
-                ]}
+                sidebarSections={this.getSidebarSections()}
                 getOverrideProperties={this.getOverridePropertiesFromEntity}
-                customNavBar={<GlossaryEntitiesPath />}
             />
         );
     };
+
+    getSidebarSections = () => [
+        {
+            component: SidebarAboutSection,
+        },
+        {
+            component: SidebarOwnerSection,
+        },
+        {
+            component: SidebarDomainSection,
+            properties: {
+                hideOwnerType: true,
+            },
+        },
+    ];
 
     getOverridePropertiesFromEntity = (glossaryTerm?: GlossaryTerm | null): GenericEntityProperties => {
         // if dataset has subTypes filled out, pick the most specific subtype and return it

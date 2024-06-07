@@ -1,6 +1,6 @@
 import logging
 from abc import ABCMeta, abstractmethod
-from typing import Any, Dict, Iterable, List, Optional, Type, Union
+from typing import Any, Dict, Iterable, List, Optional, Sequence, Union
 
 import datahub.emitter.mce_builder as builder
 from datahub.emitter.aspect import ASPECT_MAP
@@ -9,24 +9,40 @@ from datahub.emitter.mcp import MetadataChangeProposalWrapper
 from datahub.ingestion.api.common import ControlRecord, EndOfStream, RecordEnvelope
 from datahub.ingestion.api.transform import Transformer
 from datahub.metadata.schema_classes import (
-    DataFlowSnapshotClass,
-    DataJobSnapshotClass,
-    DatasetSnapshotClass,
     MetadataChangeEventClass,
     MetadataChangeProposalClass,
 )
-from datahub.utilities.urns.urn import Urn
+from datahub.utilities.urns.urn import Urn, guess_entity_type
 
 log = logging.getLogger(__name__)
 
 
-class LegacyMCETransformer(Transformer, metaclass=ABCMeta):
+def _update_work_unit_id(
+    envelope: RecordEnvelope, urn: str, aspect_name: str
+) -> Dict[Any, Any]:
+    structured_urn = Urn.from_string(urn)
+    simple_name = "-".join(structured_urn.entity_ids)
+    record_metadata = envelope.metadata.copy()
+    record_metadata.update({"workunit_id": f"txform-{simple_name}-{aspect_name}"})
+    return record_metadata
+
+
+class HandleEndOfStreamTransformer:
+    def handle_end_of_stream(
+        self,
+    ) -> Sequence[Union[MetadataChangeProposalWrapper, MetadataChangeProposalClass]]:
+        return []
+
+
+class LegacyMCETransformer(
+    Transformer, HandleEndOfStreamTransformer, metaclass=ABCMeta
+):
     @abstractmethod
     def transform_one(self, mce: MetadataChangeEventClass) -> MetadataChangeEventClass:
         pass
 
 
-class SingleAspectTransformer(metaclass=ABCMeta):
+class SingleAspectTransformer(HandleEndOfStreamTransformer, metaclass=ABCMeta):
     @abstractmethod
     def aspect_name(self) -> str:
         """Implement this method to specify a single aspect that the transformer is interested in subscribing to. No default provided."""
@@ -56,23 +72,21 @@ class BaseTransformer(Transformer, metaclass=ABCMeta):
 
     def __init__(self):
         self.entity_map: Dict[str, Dict[str, Any]] = {}
-        self.entity_type_mappings: Dict[str, Type] = {
-            "dataset": DatasetSnapshotClass,
-            "dataFlow": DataFlowSnapshotClass,
-            "dataJob": DataJobSnapshotClass,
-        }
         mixedin = False
         for mixin in [LegacyMCETransformer, SingleAspectTransformer]:
             mixedin = mixedin or isinstance(self, mixin)
         if not mixedin:
             assert (
-                "Class does not implement one of required traits {self.allowed_mixins}"
+                f"Class does not implement one of required traits {self.allowed_mixins}"
             )
 
     def _should_process(
         self,
         record: Union[
-            MetadataChangeEventClass, MetadataChangeProposalWrapper, ControlRecord
+            MetadataChangeEventClass,
+            MetadataChangeProposalWrapper,
+            MetadataChangeProposalClass,
+            ControlRecord,
         ],
     ) -> bool:
         if isinstance(record, ControlRecord):
@@ -83,14 +97,8 @@ class BaseTransformer(Transformer, metaclass=ABCMeta):
         if "*" in entity_types:
             return True
         if isinstance(record, MetadataChangeEventClass):
-            for e in entity_types:
-                assert (
-                    e in self.entity_type_mappings
-                ), f"Do not have a class mapping for {e}. Subscription to this entity will not work for transforming MCE-s"
-                if isinstance(record.proposedSnapshot, self.entity_type_mappings[e]):
-                    return True
-            # fall through, no entity type matched
-            return False
+            entity_type = guess_entity_type(record.proposedSnapshot.urn)
+            return entity_type in entity_types
         elif isinstance(
             record, (MetadataChangeProposalWrapper, MetadataChangeProposalClass)
         ):
@@ -106,7 +114,9 @@ class BaseTransformer(Transformer, metaclass=ABCMeta):
             record_entry["seen"]["mce"] = mce.systemMetadata
             self.entity_map[mce.proposedSnapshot.urn] = record_entry
 
-    def _record_mcp(self, mcp: MetadataChangeProposalWrapper) -> None:
+    def _record_mcp(
+        self, mcp: Union[MetadataChangeProposalWrapper, MetadataChangeProposalClass]
+    ) -> None:
         assert mcp.entityUrn
         record_entry = self.entity_map.get(mcp.entityUrn, {"seen": {}})
         if "seen" in record_entry and "mcp" not in record_entry["seen"]:
@@ -125,38 +135,37 @@ class BaseTransformer(Transformer, metaclass=ABCMeta):
         if mce.proposedSnapshot:
             self._record_mce(mce)
         if isinstance(self, SingleAspectTransformer):
-            aspect_type = ASPECT_MAP.get(self.aspect_name())
-            if aspect_type:
-                # if we find a type corresponding to the aspect name we look for it in the mce
-                old_aspect = (
-                    builder.get_aspect_if_available(
-                        mce,
-                        aspect_type,
+            aspect_type = ASPECT_MAP[self.aspect_name()]
+
+            # If we find a type corresponding to the aspect name we look for it in the mce
+            # It's possible that the aspect is supported by the entity but not in the MCE
+            # snapshot union. In those cases, we just want to record the urn as seen.
+            supports_aspect = builder.can_add_aspect(mce, aspect_type)
+            if supports_aspect:
+                old_aspect = builder.get_aspect_if_available(
+                    mce,
+                    aspect_type,
+                )
+                if old_aspect is not None:
+                    # TRICKY: If the aspect is not present in the MCE, it might still show up in a
+                    # subsequent MCP. As such, we _only_ mark the urn as processed if we actually
+                    # find the aspect already in the MCE.
+
+                    transformed_aspect = self.transform_aspect(
+                        entity_urn=mce.proposedSnapshot.urn,
+                        aspect_name=self.aspect_name(),
+                        aspect=old_aspect,
                     )
-                    if builder.can_add_aspect(mce, aspect_type)
-                    else None
-                )
-                if old_aspect:
-                    if isinstance(self, LegacyMCETransformer):
-                        # use the transform_one pathway to transform this MCE
-                        envelope.record = self.transform_one(mce)
-                    else:
-                        transformed_aspect = self.transform_aspect(
-                            entity_urn=mce.proposedSnapshot.urn,
-                            aspect_name=self.aspect_name(),
-                            aspect=old_aspect,
-                        )
-                        builder.set_aspect(
-                            mce,
-                            aspect_type=aspect_type,
-                            aspect=transformed_aspect,
-                        )
-                        envelope.record = mce
+
+                    # If transformed_aspect is None, this will remove the aspect.
+                    builder.set_aspect(
+                        mce,
+                        aspect_type=aspect_type,
+                        aspect=transformed_aspect,
+                    )
+
+                    envelope.record = mce
                     self._mark_processed(mce.proposedSnapshot.urn)
-            else:
-                log.warning(
-                    f"Could not locate a snapshot aspect type for aspect {self.aspect_name()}. This can lead to silent drops of messages in transformers."
-                )
         elif isinstance(self, LegacyMCETransformer):
             # we pass down the full MCE
             envelope.record = self.transform_one(mce)
@@ -164,7 +173,7 @@ class BaseTransformer(Transformer, metaclass=ABCMeta):
 
         return envelope
 
-    def _transform_or_record_mcp(
+    def _transform_or_record_mcpw(
         self,
         envelope: RecordEnvelope[MetadataChangeProposalWrapper],
     ) -> Optional[RecordEnvelope[MetadataChangeProposalWrapper]]:
@@ -189,6 +198,35 @@ class BaseTransformer(Transformer, metaclass=ABCMeta):
             self._record_mcp(envelope.record)
         return envelope if envelope.record.aspect is not None else None
 
+    def _handle_end_of_stream(
+        self, envelope: RecordEnvelope
+    ) -> Iterable[RecordEnvelope]:
+        if not isinstance(self, SingleAspectTransformer) and not isinstance(
+            self, LegacyMCETransformer
+        ):
+            return
+
+        mcps: Sequence[
+            Union[MetadataChangeProposalWrapper, MetadataChangeProposalClass]
+        ] = self.handle_end_of_stream()
+
+        for mcp in mcps:
+            if (
+                mcp.aspect is None or mcp.aspectName is None or mcp.entityUrn is None
+            ):  # to silent the lint error
+                continue
+
+            record_metadata = _update_work_unit_id(
+                envelope=envelope,
+                aspect_name=mcp.aspectName,
+                urn=mcp.entityUrn,
+            )
+
+            yield RecordEnvelope(
+                record=mcp,
+                metadata=record_metadata,
+            )
+
     def transform(
         self, record_envelopes: Iterable[RecordEnvelope]
     ) -> Iterable[RecordEnvelope]:
@@ -201,7 +239,7 @@ class BaseTransformer(Transformer, metaclass=ABCMeta):
             elif isinstance(
                 envelope.record, MetadataChangeProposalWrapper
             ) and isinstance(self, SingleAspectTransformer):
-                return_envelope = self._transform_or_record_mcp(envelope)
+                return_envelope = self._transform_or_record_mcpw(envelope)
                 if return_envelope is None:
                     continue
                 else:
@@ -225,17 +263,10 @@ class BaseTransformer(Transformer, metaclass=ABCMeta):
                             else None,
                         )
                         if transformed_aspect:
-                            # for end of stream records, we modify the workunit-id
-                            structured_urn = Urn.create_from_string(urn)
-                            simple_name = "-".join(structured_urn.get_entity_id())
-                            record_metadata = envelope.metadata.copy()
-                            record_metadata.update(
-                                {
-                                    "workunit_id": f"txform-{simple_name}-{self.aspect_name()}"
-                                }
-                            )
-                            yield RecordEnvelope(
-                                record=MetadataChangeProposalWrapper(
+                            structured_urn = Urn.from_string(urn)
+
+                            mcp: MetadataChangeProposalWrapper = (
+                                MetadataChangeProposalWrapper(
                                     entityUrn=urn,
                                     entityType=structured_urn.get_type(),
                                     systemMetadata=last_seen_mcp.systemMetadata
@@ -243,8 +274,21 @@ class BaseTransformer(Transformer, metaclass=ABCMeta):
                                     else last_seen_mce_system_metadata,
                                     aspectName=self.aspect_name(),
                                     aspect=transformed_aspect,
-                                ),
+                                )
+                            )
+
+                            record_metadata = _update_work_unit_id(
+                                envelope=envelope,
+                                aspect_name=mcp.aspect.get_aspect_name(),  # type: ignore
+                                urn=mcp.entityUrn,
+                            )
+
+                            yield RecordEnvelope(
+                                record=mcp,
                                 metadata=record_metadata,
                             )
+
                     self._mark_processed(urn)
+                yield from self._handle_end_of_stream(envelope=envelope)
+
             yield envelope

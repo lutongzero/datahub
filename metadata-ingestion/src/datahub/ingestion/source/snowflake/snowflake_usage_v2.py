@@ -2,16 +2,15 @@ import json
 import logging
 import time
 from datetime import datetime, timezone
-from typing import Any, Dict, Iterable, List, Optional
+from typing import Any, Callable, Dict, Iterable, List, Optional, Tuple
 
 import pydantic
 from snowflake.connector import SnowflakeConnection
 
-from datahub.emitter.mce_builder import (
-    make_dataset_urn_with_platform_instance,
-    make_user_urn,
-)
+from datahub.configuration.time_window_config import BaseTimeWindowConfig
+from datahub.emitter.mce_builder import make_user_urn
 from datahub.emitter.mcp import MetadataChangeProposalWrapper
+from datahub.ingestion.api.source_helpers import auto_empty_dataset_usage_statistics
 from datahub.ingestion.api.workunit import MetadataWorkUnit
 from datahub.ingestion.source.snowflake.constants import SnowflakeEdition
 from datahub.ingestion.source.snowflake.snowflake_config import SnowflakeV2Config
@@ -23,19 +22,23 @@ from datahub.ingestion.source.snowflake.snowflake_utils import (
     SnowflakePermissionError,
     SnowflakeQueryMixin,
 )
+from datahub.ingestion.source.state.redundant_run_skip_handler import (
+    RedundantUsageRunSkipHandler,
+)
+from datahub.ingestion.source_report.ingestion_stage import (
+    USAGE_EXTRACTION_OPERATIONAL_STATS,
+    USAGE_EXTRACTION_USAGE_AGGREGATION,
+)
 from datahub.metadata.com.linkedin.pegasus2avro.dataset import (
     DatasetFieldUsageCounts,
     DatasetUsageStatistics,
     DatasetUserUsageCounts,
 )
 from datahub.metadata.com.linkedin.pegasus2avro.timeseries import TimeWindowSize
-from datahub.metadata.schema_classes import (
-    ChangeTypeClass,
-    OperationClass,
-    OperationTypeClass,
-)
+from datahub.metadata.schema_classes import OperationClass, OperationTypeClass
+from datahub.sql_parsing.sqlglot_utils import try_format_query
 from datahub.utilities.perf_timer import PerfTimer
-from datahub.utilities.sql_formatter import format_sql_query, trim_query
+from datahub.utilities.sql_formatter import trim_query
 
 logger: logging.Logger = logging.getLogger(__name__)
 
@@ -46,6 +49,20 @@ OPERATION_STATEMENT_TYPES = {
     "CREATE": OperationTypeClass.CREATE,
     "CREATE_TABLE": OperationTypeClass.CREATE,
     "CREATE_TABLE_AS_SELECT": OperationTypeClass.CREATE,
+    "MERGE": OperationTypeClass.CUSTOM,
+    "COPY": OperationTypeClass.CUSTOM,
+    "TRUNCATE_TABLE": OperationTypeClass.CUSTOM,
+    # TODO: Dataset for below query types are not detected by snowflake in snowflake.access_history.objects_modified.
+    # However it seems possible to support these using sql parsing in future.
+    # When this support is added, snowflake_query.operational_data_for_time_window needs to be updated.
+    # "CREATE_VIEW": OperationTypeClass.CREATE,
+    # "CREATE_EXTERNAL_TABLE": OperationTypeClass.CREATE,
+    # "ALTER_TABLE_MODIFY_COLUMN": OperationTypeClass.ALTER,
+    # "ALTER_TABLE_ADD_COLUMN": OperationTypeClass.ALTER,
+    # "RENAME_COLUMN": OperationTypeClass.ALTER,
+    # "ALTER_SET_TAG": OperationTypeClass.ALTER,
+    # "ALTER_TABLE_DROP_COLUMN": OperationTypeClass.ALTER,
+    # "ALTER": OperationTypeClass.ALTER,
 }
 
 
@@ -63,44 +80,71 @@ class SnowflakeColumnReference(PermissiveModel):
 
 
 class SnowflakeObjectAccessEntry(PermissiveModel):
-    columns: Optional[List[SnowflakeColumnReference]]
+    columns: Optional[List[SnowflakeColumnReference]] = None
     objectDomain: str
-    objectId: int
     objectName: str
-    stageKind: Optional[str]
+    # Seems like it should never be null, but in practice have seen null objectIds
+    objectId: Optional[int] = None
+    stageKind: Optional[str] = None
 
 
 class SnowflakeJoinedAccessEvent(PermissiveModel):
     query_start_time: datetime
     query_text: str
     query_type: str
-    rows_inserted: Optional[int]
-    rows_updated: Optional[int]
-    rows_deleted: Optional[int]
+    rows_inserted: Optional[int] = None
+    rows_updated: Optional[int] = None
+    rows_deleted: Optional[int] = None
     base_objects_accessed: List[SnowflakeObjectAccessEntry]
     direct_objects_accessed: List[SnowflakeObjectAccessEntry]
     objects_modified: List[SnowflakeObjectAccessEntry]
 
     user_name: str
-    first_name: Optional[str]
-    last_name: Optional[str]
-    display_name: Optional[str]
-    email: Optional[str]
+    first_name: Optional[str] = None
+    last_name: Optional[str] = None
+    display_name: Optional[str] = None
+    email: Optional[str] = None
     role_name: str
 
 
 class SnowflakeUsageExtractor(
     SnowflakeQueryMixin, SnowflakeConnectionMixin, SnowflakeCommonMixin
 ):
-    def __init__(self, config: SnowflakeV2Config, report: SnowflakeV2Report) -> None:
+    def __init__(
+        self,
+        config: SnowflakeV2Config,
+        report: SnowflakeV2Report,
+        dataset_urn_builder: Callable[[str], str],
+        redundant_run_skip_handler: Optional[RedundantUsageRunSkipHandler],
+    ) -> None:
         self.config: SnowflakeV2Config = config
         self.report: SnowflakeV2Report = report
+        self.dataset_urn_builder = dataset_urn_builder
         self.logger = logger
         self.connection: Optional[SnowflakeConnection] = None
 
-    def get_workunits(
+        self.redundant_run_skip_handler = redundant_run_skip_handler
+        self.start_time, self.end_time = (
+            self.report.usage_start_time,
+            self.report.usage_end_time,
+        ) = self.get_time_window()
+
+    def get_time_window(self) -> Tuple[datetime, datetime]:
+        if self.redundant_run_skip_handler:
+            return self.redundant_run_skip_handler.suggest_run_time_window(
+                self.config.start_time, self.config.end_time
+            )
+        else:
+            return self.config.start_time, self.config.end_time
+
+    def get_usage_workunits(
         self, discovered_datasets: List[str]
     ) -> Iterable[MetadataWorkUnit]:
+        if not self._should_ingest_usage():
+            return
+
+        self.report.set_ingestion_stage("*", USAGE_EXTRACTION_USAGE_AGGREGATION)
+
         self.connection = self.create_connection()
         if self.connection is None:
             return
@@ -126,7 +170,20 @@ class SnowflakeUsageExtractor(
         # Now, we report the usage as well as operation metadata even if user email is absent
 
         if self.config.include_usage_stats:
-            yield from self.get_usage_workunits(discovered_datasets)
+            yield from auto_empty_dataset_usage_statistics(
+                self._get_workunits_internal(discovered_datasets),
+                config=BaseTimeWindowConfig(
+                    start_time=self.start_time,
+                    end_time=self.end_time,
+                    bucket_duration=self.config.bucket_duration,
+                ),
+                dataset_urns={
+                    self.dataset_urn_builder(dataset_identifier)
+                    for dataset_identifier in discovered_datasets
+                },
+            )
+
+        self.report.set_ingestion_stage("*", USAGE_EXTRACTION_OPERATIONAL_STATS)
 
         if self.config.include_operational_stats:
             # Generate the operation workunits.
@@ -136,7 +193,15 @@ class SnowflakeUsageExtractor(
                     event, discovered_datasets
                 )
 
-    def get_usage_workunits(
+        if self.redundant_run_skip_handler:
+            # Update the checkpoint state for this run.
+            self.redundant_run_skip_handler.update_state(
+                self.config.start_time,
+                self.config.end_time,
+                self.config.bucket_duration,
+            )
+
+    def _get_workunits_internal(
         self, discovered_datasets: List[str]
     ) -> Iterable[MetadataWorkUnit]:
         with PerfTimer() as timer:
@@ -144,44 +209,66 @@ class SnowflakeUsageExtractor(
             try:
                 results = self.query(
                     SnowflakeQuery.usage_per_object_per_time_bucket_for_time_window(
-                        start_time_millis=int(
-                            self.config.start_time.timestamp() * 1000
-                        ),
-                        end_time_millis=int(self.config.end_time.timestamp() * 1000),
+                        start_time_millis=int(self.start_time.timestamp() * 1000),
+                        end_time_millis=int(self.end_time.timestamp() * 1000),
                         time_bucket_size=self.config.bucket_duration,
                         use_base_objects=self.config.apply_view_usage_to_tables,
                         top_n_queries=self.config.top_n_queries,
                         include_top_n_queries=self.config.include_top_n_queries,
+                        email_domain=self.config.email_domain,
+                        email_filter=self.config.user_email_pattern,
+                        table_deny_pattern=self.config.temporary_tables_pattern,
                     ),
                 )
             except Exception as e:
                 logger.debug(e, exc_info=e)
-                self.report_warning(
+                self.warn_if_stateful_else_error(
                     "usage-statistics",
                     f"Populating table usage statistics from Snowflake failed due to error {e}.",
                 )
+                self.report_status(USAGE_EXTRACTION_USAGE_AGGREGATION, False)
                 return
-            self.report.usage_aggregation_query_secs = timer.elapsed_seconds()
 
-        for row in results:
-            if not self._is_dataset_pattern_allowed(
-                row["OBJECT_NAME"],
-                row["OBJECT_DOMAIN"],
-            ):
-                continue
+            self.report.usage_aggregation.query_secs = timer.elapsed_seconds()
+            self.report.usage_aggregation.query_row_count = results.rowcount
 
-            dataset_identifier = self.get_dataset_identifier_from_qualified_name(
-                row["OBJECT_NAME"]
-            )
-            if dataset_identifier not in discovered_datasets:
-                logger.debug(
-                    f"Skipping usage for table {dataset_identifier}, as table schema is not accessible"
-                )
-                continue
+        with self.report.usage_aggregation.result_fetch_timer as fetch_timer:
+            for row in results:
+                with fetch_timer.pause(), self.report.usage_aggregation.result_skip_timer as skip_timer:
+                    if results.rownumber is not None and results.rownumber % 1000 == 0:
+                        logger.debug(f"Processing usage row number {results.rownumber}")
+                        logger.debug(self.report.usage_aggregation.as_string())
 
-            yield from self.build_usage_statistics_for_dataset(dataset_identifier, row)
+                    if not self._is_dataset_pattern_allowed(
+                        row["OBJECT_NAME"],
+                        row["OBJECT_DOMAIN"],
+                    ):
+                        logger.debug(
+                            f"Skipping usage for {row['OBJECT_DOMAIN']} {row['OBJECT_NAME']}, as table is not allowed by recipe."
+                        )
+                        continue
 
-    def build_usage_statistics_for_dataset(self, dataset_identifier, row):
+                    dataset_identifier = (
+                        self.get_dataset_identifier_from_qualified_name(
+                            row["OBJECT_NAME"]
+                        )
+                    )
+                    if dataset_identifier not in discovered_datasets:
+                        logger.debug(
+                            f"Skipping usage for {row['OBJECT_DOMAIN']} {dataset_identifier}, as table is not accessible."
+                        )
+                        continue
+                    with skip_timer.pause(), self.report.usage_aggregation.result_map_timer as map_timer:
+                        wu = self.build_usage_statistics_for_dataset(
+                            dataset_identifier, row
+                        )
+                        if wu:
+                            with map_timer.pause():
+                                yield wu
+
+    def build_usage_statistics_for_dataset(
+        self, dataset_identifier: str, row: dict
+    ) -> Optional[MetadataWorkUnit]:
         try:
             stats = DatasetUsageStatistics(
                 timestampMillis=int(row["BUCKET_START_TIME"].timestamp() * 1000),
@@ -190,23 +277,16 @@ class SnowflakeUsageExtractor(
                 ),
                 totalSqlQueries=row["TOTAL_QUERIES"],
                 uniqueUserCount=row["TOTAL_USERS"],
-                topSqlQueries=self._map_top_sql_queries(
-                    json.loads(row["TOP_SQL_QUERIES"])
-                )
-                if self.config.include_top_n_queries
-                else None,
-                userCounts=self._map_user_counts(json.loads(row["USER_COUNTS"])),
-                fieldCounts=self._map_field_counts(json.loads(row["FIELD_COUNTS"])),
+                topSqlQueries=(
+                    self._map_top_sql_queries(row["TOP_SQL_QUERIES"])
+                    if self.config.include_top_n_queries
+                    else None
+                ),
+                userCounts=self._map_user_counts(row["USER_COUNTS"]),
+                fieldCounts=self._map_field_counts(row["FIELD_COUNTS"]),
             )
-            dataset_urn = make_dataset_urn_with_platform_instance(
-                self.platform,
-                dataset_identifier,
-                self.config.platform_instance,
-                self.config.env,
-            )
-
-            yield MetadataChangeProposalWrapper(
-                entityUrn=dataset_urn, aspect=stats
+            return MetadataChangeProposalWrapper(
+                entityUrn=self.dataset_urn_builder(dataset_identifier), aspect=stats
             ).as_workunit()
         except Exception as e:
             logger.debug(
@@ -217,55 +297,79 @@ class SnowflakeUsageExtractor(
                 "Failed to parse usage statistics for dataset", dataset_identifier
             )
 
-    def _map_top_sql_queries(self, top_sql_queries: Dict) -> List[str]:
-        total_budget_for_query_list: int = 24000
-        budget_per_query: int = int(
-            total_budget_for_query_list / self.config.top_n_queries
-        )
-        return sorted(
-            [
-                trim_query(format_sql_query(query), budget_per_query)
-                if self.config.format_sql_queries
-                else trim_query(query, budget_per_query)
-                for query in top_sql_queries
-            ]
-        )
+        return None
 
-    def _map_user_counts(self, user_counts: Dict) -> List[DatasetUserUsageCounts]:
-        filtered_user_counts = []
-        for user_count in user_counts:
-            user_email = user_count.get("email")
-            if not user_email and self.config.email_domain and user_count["user_name"]:
-                user_email = "{0}@{1}".format(
-                    user_count["user_name"], self.config.email_domain
-                ).lower()
-            if not user_email or not self.config.user_email_pattern.allowed(user_email):
-                continue
-
-            filtered_user_counts.append(
-                DatasetUserUsageCounts(
-                    user=make_user_urn(
-                        self.get_user_identifier(user_count["user_name"], user_email)
-                    ),
-                    count=user_count["total"],
-                    # NOTE: Generated emails may be incorrect, as email may be different than
-                    # username@email_domain
-                    userEmail=user_email,
-                )
+    def _map_top_sql_queries(self, top_sql_queries_str: str) -> List[str]:
+        with self.report.usage_aggregation.queries_map_timer:
+            top_sql_queries = json.loads(top_sql_queries_str)
+            budget_per_query: int = int(
+                self.config.queries_character_limit / self.config.top_n_queries
             )
-        return sorted(filtered_user_counts, key=lambda v: v.user)
+            return sorted(
+                [
+                    (
+                        trim_query(
+                            try_format_query(query, self.platform), budget_per_query
+                        )
+                        if self.config.format_sql_queries
+                        else trim_query(query, budget_per_query)
+                    )
+                    for query in top_sql_queries
+                ]
+            )
 
-    def _map_field_counts(self, field_counts: Dict) -> List[DatasetFieldUsageCounts]:
-        return sorted(
-            [
-                DatasetFieldUsageCounts(
-                    fieldPath=self.snowflake_identifier(field_count["col"]),
-                    count=field_count["total"],
+    def _map_user_counts(
+        self,
+        user_counts_str: str,
+    ) -> List[DatasetUserUsageCounts]:
+        with self.report.usage_aggregation.users_map_timer:
+            user_counts = json.loads(user_counts_str)
+            filtered_user_counts = []
+            for user_count in user_counts:
+                user_email = user_count.get("email")
+                if (
+                    not user_email
+                    and self.config.email_domain
+                    and user_count["user_name"]
+                ):
+                    user_email = "{}@{}".format(
+                        user_count["user_name"], self.config.email_domain
+                    ).lower()
+                if not user_email or not self.config.user_email_pattern.allowed(
+                    user_email
+                ):
+                    continue
+
+                filtered_user_counts.append(
+                    DatasetUserUsageCounts(
+                        user=make_user_urn(
+                            self.get_user_identifier(
+                                user_count["user_name"],
+                                user_email,
+                                self.config.email_as_user_identifier,
+                            )
+                        ),
+                        count=user_count["total"],
+                        # NOTE: Generated emails may be incorrect, as email may be different than
+                        # username@email_domain
+                        userEmail=user_email,
+                    )
                 )
-                for field_count in field_counts
-            ],
-            key=lambda v: v.fieldPath,
-        )
+            return sorted(filtered_user_counts, key=lambda v: v.user)
+
+    def _map_field_counts(self, field_counts_str: str) -> List[DatasetFieldUsageCounts]:
+        with self.report.usage_aggregation.fields_map_timer:
+            field_counts = json.loads(field_counts_str)
+            return sorted(
+                [
+                    DatasetFieldUsageCounts(
+                        fieldPath=self.snowflake_identifier(field_count["col"]),
+                        count=field_count["total"],
+                    )
+                    for field_count in field_counts
+                ],
+                key=lambda v: v.fieldPath,
+            )
 
     def _get_snowflake_history(self) -> Iterable[SnowflakeJoinedAccessEvent]:
         logger.info("Getting access history")
@@ -275,10 +379,11 @@ class SnowflakeUsageExtractor(
                 results = self.query(query)
             except Exception as e:
                 logger.debug(e, exc_info=e)
-                self.report_warning(
+                self.warn_if_stateful_else_error(
                     "operation",
                     f"Populating table operation history from Snowflake failed due to error {e}.",
                 )
+                self.report_status(USAGE_EXTRACTION_OPERATIONAL_STATS, False)
                 return
             self.report.access_history_query_secs = round(timer.elapsed_seconds(), 2)
 
@@ -286,11 +391,11 @@ class SnowflakeUsageExtractor(
             yield from self._process_snowflake_history_row(row)
 
     def _make_operations_query(self) -> str:
-        start_time = int(self.config.start_time.timestamp() * 1000)
-        end_time = int(self.config.end_time.timestamp() * 1000)
+        start_time = int(self.start_time.timestamp() * 1000)
+        end_time = int(self.end_time.timestamp() * 1000)
         return SnowflakeQuery.operational_data_for_time_window(start_time, end_time)
 
-    def _check_usage_date_ranges(self) -> Any:
+    def _check_usage_date_ranges(self) -> None:
         with PerfTimer() as timer:
             try:
                 results = self.query(SnowflakeQuery.get_access_history_date_range())
@@ -306,6 +411,7 @@ class SnowflakeUsageExtractor(
                         "usage",
                         f"Extracting the date range for usage data from Snowflake failed due to error {e}.",
                     )
+                self.report_status("date-range-check", False)
             else:
                 for db_row in results:
                     if (
@@ -331,15 +437,21 @@ class SnowflakeUsageExtractor(
     def _get_operation_aspect_work_unit(
         self, event: SnowflakeJoinedAccessEvent, discovered_datasets: List[str]
     ) -> Iterable[MetadataWorkUnit]:
-        if event.query_start_time and event.query_type in OPERATION_STATEMENT_TYPES:
+        if event.query_start_time and event.query_type:
             start_time = event.query_start_time
             query_type = event.query_type
             user_email = event.email
             user_name = event.user_name
-            operation_type = OPERATION_STATEMENT_TYPES[query_type]
+            operation_type = OPERATION_STATEMENT_TYPES.get(
+                query_type, OperationTypeClass.CUSTOM
+            )
             reported_time: int = int(time.time() * 1000)
             last_updated_timestamp: int = int(start_time.timestamp() * 1000)
-            user_urn = make_user_urn(self.get_user_identifier(user_name, user_email))
+            user_urn = make_user_urn(
+                self.get_user_identifier(
+                    user_name, user_email, self.config.email_as_user_identifier
+                )
+            )
 
             # NOTE: In earlier `snowflake-usage` connector this was base_objects_accessed, which is incorrect
             for obj in event.objects_modified:
@@ -355,44 +467,32 @@ class SnowflakeUsageExtractor(
                     )
                     continue
 
-                dataset_urn = make_dataset_urn_with_platform_instance(
-                    self.platform,
-                    dataset_identifier,
-                    self.config.platform_instance,
-                    self.config.env,
-                )
                 operation_aspect = OperationClass(
                     timestampMillis=reported_time,
                     lastUpdatedTimestamp=last_updated_timestamp,
                     actor=user_urn,
                     operationType=operation_type,
+                    customOperationType=(
+                        query_type
+                        if operation_type is OperationTypeClass.CUSTOM
+                        else None
+                    ),
                 )
                 mcp = MetadataChangeProposalWrapper(
-                    entityType="dataset",
-                    aspectName="operation",
-                    changeType=ChangeTypeClass.UPSERT,
-                    entityUrn=dataset_urn,
+                    entityUrn=self.dataset_urn_builder(dataset_identifier),
                     aspect=operation_aspect,
                 )
                 wu = MetadataWorkUnit(
                     id=f"{start_time.isoformat()}-operation-aspect-{resource}",
                     mcp=mcp,
                 )
-                self.report.report_workunit(wu)
                 yield wu
 
     def _process_snowflake_history_row(
-        self, row: Any
+        self, event_dict: dict
     ) -> Iterable[SnowflakeJoinedAccessEvent]:
         try:  # big hammer try block to ensure we don't fail on parsing events
             self.report.rows_processed += 1
-            # Make some minor type conversions.
-            if hasattr(row, "_asdict"):
-                # Compat with SQLAlchemy 1.3 and 1.4
-                # See https://docs.sqlalchemy.org/en/14/changelog/migration_14.html#rowproxy-is-no-longer-a-proxy-is-now-called-row-and-behaves-like-an-enhanced-named-tuple.
-                event_dict = row._asdict()
-            else:
-                event_dict = dict(row)
 
             # no use processing events that don't have a query text
             if not event_dict["QUERY_TEXT"]:
@@ -410,7 +510,7 @@ class SnowflakeUsageExtractor(
                 f"Failed to parse operation history row {event_dict}, {e}",
             )
 
-    def parse_event_objects(self, event_dict):
+    def parse_event_objects(self, event_dict: Dict) -> None:
         event_dict["BASE_OBJECTS_ACCESSED"] = [
             obj
             for obj in json.loads(event_dict["BASE_OBJECTS_ACCESSED"])
@@ -469,3 +569,24 @@ class SnowflakeUsageExtractor(
         ):
             return False
         return True
+
+    def _should_ingest_usage(self) -> bool:
+        if (
+            self.redundant_run_skip_handler
+            and self.redundant_run_skip_handler.should_skip_this_run(
+                cur_start_time=self.config.start_time,
+                cur_end_time=self.config.end_time,
+            )
+        ):
+            # Skip this run
+            self.report.report_warning(
+                "usage-extraction",
+                "Skip this run as there was already a run for current ingestion window.",
+            )
+            return False
+
+        return True
+
+    def report_status(self, step: str, status: bool) -> None:
+        if self.redundant_run_skip_handler:
+            self.redundant_run_skip_handler.report_current_run_status(step, status)

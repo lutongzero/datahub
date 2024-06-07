@@ -9,6 +9,7 @@
             "customProperties": {
                 "platform": "glue",
                 "instance": "some_instance_name",
+                "env": "PROD",
                 "database": "flights-database"
             },
             "name": "flights-database",
@@ -114,6 +115,7 @@
                             {
                                 "fieldPath": "[version=2.0].[type=int].yr",
                                 "nullable": true,
+                                "description": "test comment",
                                 "type": {
                                     "type": {
                                         "com.linkedin.pegasus2avro.schema.NumberType": {}
@@ -205,6 +207,7 @@
                             {
                                 "fieldPath": "[version=2.0].[type=string].year",
                                 "nullable": true,
+                                "description": "partition test comment",
                                 "type": {
                                     "type": {
                                         "com.linkedin.pegasus2avro.schema.StringType": {}
@@ -262,7 +265,7 @@
     "aspect": {
         "json": {
             "typeNames": [
-                "table"
+                "Table"
             ]
         }
     }
@@ -288,6 +291,7 @@
             "customProperties": {
                 "platform": "glue",
                 "instance": "some_instance_name",
+                "env": "PROD",
                 "database": "test-database"
             },
             "name": "test-database",
@@ -500,7 +504,7 @@
     "aspect": {
         "json": {
             "typeNames": [
-                "table"
+                "Table"
             ]
         }
     }
@@ -686,7 +690,7 @@
     "aspect": {
         "json": {
             "typeNames": [
-                "table"
+                "Table"
             ]
         }
     }
@@ -1256,6 +1260,28 @@
     "aspect": {
         "json": {
             "removed": false
+        }
+    }
+},
+{
+    "entityType": "tag",
+    "entityUrn": "urn:li:tag:baz:bob",
+    "changeType": "UPSERT",
+    "aspectName": "tagKey",
+    "aspect": {
+        "json": {
+            "name": "baz:bob"
+        }
+    }
+},
+{
+    "entityType": "tag",
+    "entityUrn": "urn:li:tag:foo:bar",
+    "changeType": "UPSERT",
+    "aspectName": "tagKey",
+    "aspect": {
+        "json": {
+            "name": "foo:bar"
         }
     }
 }

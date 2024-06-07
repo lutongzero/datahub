@@ -52,6 +52,9 @@ In order to configure ingestion from Snowflake, you'll first have to ensure you 
    grant references on all views in database identifier($db_var) to role datahub_role;
    grant references on future views in database identifier($db_var) to role datahub_role;
 
+   -- Assign privileges to extract lineage and usage statistics from Snowflake by executing the below query.
+   grant imported privileges on database snowflake to role datahub_role;
+
    ```
 
    If you have imported databases in your Snowflake instance that you wish to integrate with DataHub, you'll need to use the below query for them.
@@ -60,14 +63,8 @@ In order to configure ingestion from Snowflake, you'll first have to ensure you 
    grant IMPORTED PRIVILEGES on database "<your-database>" to role datahub_role;  
    ```
 
-4. Assign privileges to extract lineage and usage statistics from Snowflake by executing the below query.
-
-   ```sql
-   grant imported privileges on database snowflake to role datahub_role;
-   ```
-
 ## Next Steps
 
 Once you've done all of the above in Snowflake, it's time to [move on](configuration.md) to configuring the actual ingestion source within DataHub.
 
-*Need more help? Join the conversation in [Slack](http://slack.datahubproject.io)!*
+

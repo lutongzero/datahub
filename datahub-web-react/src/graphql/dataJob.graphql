@@ -1,16 +1,24 @@
 query getDataJob($urn: String!) {
     dataJob(urn: $urn) {
         ...dataJobFields
-        upstream: lineage(input: { direction: UPSTREAM, start: 0, count: 100 }) {
-            ...partialLineageResults
-        }
-        downstream: lineage(input: { direction: DOWNSTREAM, start: 0, count: 100 }) {
-            ...partialLineageResults
+        privileges {
+            ...entityPrivileges
         }
         runs(start: 0, count: 20) {
             count
             start
             total
+        }
+        autoRenderAspects: aspects(input: { autoRenderOnly: true }) {
+            ...autoRenderAspectFields
+        }
+        structuredProperties {
+            properties {
+                ...structuredPropertiesFields
+            }
+        }
+        forms {
+            ...formsFields
         }
     }
 }

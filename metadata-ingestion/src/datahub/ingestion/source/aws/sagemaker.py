@@ -1,5 +1,5 @@
 from collections import defaultdict
-from typing import DefaultDict, Dict, Iterable
+from typing import DefaultDict, Dict, Iterable, List, Optional
 
 from datahub.ingestion.api.common import PipelineContext
 from datahub.ingestion.api.decorators import (
@@ -10,7 +10,7 @@ from datahub.ingestion.api.decorators import (
     platform_name,
     support_status,
 )
-from datahub.ingestion.api.source import Source
+from datahub.ingestion.api.source import MetadataWorkUnitProcessor
 from datahub.ingestion.api.workunit import MetadataWorkUnit
 from datahub.ingestion.source.aws.sagemaker_processors.common import (
     SagemakerSourceConfig,
@@ -26,13 +26,19 @@ from datahub.ingestion.source.aws.sagemaker_processors.jobs import (
 )
 from datahub.ingestion.source.aws.sagemaker_processors.lineage import LineageProcessor
 from datahub.ingestion.source.aws.sagemaker_processors.models import ModelProcessor
+from datahub.ingestion.source.state.stale_entity_removal_handler import (
+    StaleEntityRemovalHandler,
+)
+from datahub.ingestion.source.state.stateful_ingestion_base import (
+    StatefulIngestionSourceBase,
+)
 
 
 @platform_name("SageMaker")
 @config_class(SagemakerSourceConfig)
 @support_status(SupportStatus.CERTIFIED)
 @capability(SourceCapability.LINEAGE_COARSE, "Enabled by default")
-class SagemakerSource(Source):
+class SagemakerSource(StatefulIngestionSourceBase):
     """
     This plugin extracts the following:
 
@@ -40,11 +46,12 @@ class SagemakerSource(Source):
     - Models, jobs, and lineage between the two (e.g. when jobs output a model or a model is used by a job)
     """
 
+    platform = "sagemaker"
     source_config: SagemakerSourceConfig
     report = SagemakerSourceReport()
 
     def __init__(self, config: SagemakerSourceConfig, ctx: PipelineContext):
-        super().__init__(ctx)
+        super().__init__(config, ctx)
         self.source_config = config
         self.report = SagemakerSourceReport()
         self.sagemaker_client = config.sagemaker_client
@@ -55,7 +62,15 @@ class SagemakerSource(Source):
         config = SagemakerSourceConfig.parse_obj(config_dict)
         return cls(config, ctx)
 
-    def get_workunits(self) -> Iterable[MetadataWorkUnit]:
+    def get_workunit_processors(self) -> List[Optional[MetadataWorkUnitProcessor]]:
+        return [
+            *super().get_workunit_processors(),
+            StaleEntityRemovalHandler.create(
+                self, self.source_config, self.ctx
+            ).workunit_processor,
+        ]
+
+    def get_workunits_internal(self) -> Iterable[MetadataWorkUnit]:
         # get common lineage graph
         lineage_processor = LineageProcessor(
             sagemaker_client=self.sagemaker_client, env=self.env, report=self.report
@@ -81,7 +96,7 @@ class SagemakerSource(Source):
                 env=self.env,
                 report=self.report,
                 job_type_filter=self.source_config.extract_jobs,
-                aws_region=self.source_config.aws_region,
+                aws_region=self.sagemaker_client.meta.region_name,
             )
             yield from job_processor.get_workunits()
 
@@ -97,7 +112,7 @@ class SagemakerSource(Source):
                 model_image_to_jobs=model_image_to_jobs,
                 model_name_to_jobs=model_name_to_jobs,
                 lineage=lineage,
-                aws_region=self.source_config.aws_region,
+                aws_region=self.sagemaker_client.meta.region_name,
             )
             yield from model_processor.get_workunits()
 

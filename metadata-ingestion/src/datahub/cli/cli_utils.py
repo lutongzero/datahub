@@ -9,26 +9,19 @@ from typing import Any, Dict, Iterable, List, Optional, Tuple, Type, Union
 
 import click
 import requests
-import yaml
-from pydantic import BaseModel, ValidationError
+from deprecated import deprecated
 from requests.models import Response
 from requests.sessions import Session
 
+from datahub.cli import config_utils
 from datahub.emitter.aspect import ASPECT_MAP, TIMESERIES_ASPECT_MAP
-from datahub.emitter.request_helper import _make_curl_command
+from datahub.emitter.request_helper import make_curl_command
 from datahub.emitter.serialization_helper import post_json_transform
 from datahub.metadata.schema_classes import _Aspect
 from datahub.utilities.urns.urn import Urn, guess_entity_type
 
 log = logging.getLogger(__name__)
 
-DEFAULT_GMS_HOST = "http://localhost:8080"
-CONDENSED_DATAHUB_CONFIG_PATH = "~/.datahubenv"
-DATAHUB_CONFIG_PATH = os.path.expanduser(CONDENSED_DATAHUB_CONFIG_PATH)
-
-DATAHUB_ROOT_FOLDER = os.path.expanduser("~/.datahub")
-
-ENV_SKIP_CONFIG = "DATAHUB_SKIP_CONFIG"
 ENV_METADATA_HOST_URL = "DATAHUB_GMS_URL"
 ENV_METADATA_HOST = "DATAHUB_GMS_HOST"
 ENV_METADATA_PORT = "DATAHUB_GMS_PORT"
@@ -44,102 +37,11 @@ config_override: Dict = {}
 # For the methods that aren't duplicates, that logic should be moved to the client.
 
 
-class GmsConfig(BaseModel):
-    server: str
-    token: Optional[str]
-
-
-class DatahubConfig(BaseModel):
-    gms: GmsConfig
-
-
-def get_boolean_env_variable(key: str, default: bool = False) -> bool:
-    value = os.environ.get(key)
-    if value is None:
-        return default
-    elif value.lower() in ("true", "1"):
-        return True
-    else:
-        return False
-
-
 def set_env_variables_override_config(url: str, token: Optional[str]) -> None:
     """Should be used to override the config when using rest emitter"""
     config_override[ENV_METADATA_HOST_URL] = url
     if token is not None:
         config_override[ENV_METADATA_TOKEN] = token
-
-
-def persist_datahub_config(config: dict) -> None:
-    with open(DATAHUB_CONFIG_PATH, "w+") as outfile:
-        yaml.dump(config, outfile, default_flow_style=False)
-    return None
-
-
-def write_gms_config(
-    host: str, token: Optional[str], merge_with_previous: bool = True
-) -> None:
-    config = DatahubConfig(gms=GmsConfig(server=host, token=token))
-    if merge_with_previous:
-        try:
-            previous_config = get_client_config(as_dict=True)
-            assert isinstance(previous_config, dict)
-        except Exception as e:
-            # ok to fail on this
-            previous_config = {}
-            log.debug(
-                f"Failed to retrieve config from file {DATAHUB_CONFIG_PATH}: {e}. This isn't fatal."
-            )
-        config_dict = {**previous_config, **config.dict()}
-    else:
-        config_dict = config.dict()
-    persist_datahub_config(config_dict)
-
-
-def should_skip_config() -> bool:
-    return get_boolean_env_variable(ENV_SKIP_CONFIG, False)
-
-
-def ensure_datahub_config() -> None:
-    if not os.path.isfile(DATAHUB_CONFIG_PATH):
-        click.secho(
-            f"No {CONDENSED_DATAHUB_CONFIG_PATH} file found, generating one for you...",
-            bold=True,
-        )
-        write_gms_config(DEFAULT_GMS_HOST, None)
-
-
-def get_client_config(as_dict: bool = False) -> Union[Optional[DatahubConfig], dict]:
-    with open(DATAHUB_CONFIG_PATH, "r") as stream:
-        try:
-            config_json = yaml.safe_load(stream)
-            if as_dict:
-                return config_json
-            try:
-                datahub_config = DatahubConfig.parse_obj(config_json)
-                return datahub_config
-            except ValidationError as e:
-                click.echo(
-                    f"Received error, please check your {CONDENSED_DATAHUB_CONFIG_PATH}"
-                )
-                click.echo(e, err=True)
-                sys.exit(1)
-        except yaml.YAMLError as exc:
-            click.secho(f"{DATAHUB_CONFIG_PATH} malformed, error: {exc}", bold=True)
-            return None
-
-
-def get_details_from_config():
-    datahub_config = get_client_config(as_dict=False)
-    assert isinstance(datahub_config, DatahubConfig)
-    if datahub_config is not None:
-        gms_config = datahub_config.gms
-
-        gms_host = gms_config.server
-        gms_token = gms_config.token
-        return gms_host, gms_token
-    else:
-        return None, None
 
 
 def get_details_from_env() -> Tuple[Optional[str], Optional[str]]:
@@ -177,12 +79,12 @@ def get_url_and_token():
     if len(config_override.keys()) > 0:
         gms_host = config_override.get(ENV_METADATA_HOST_URL)
         gms_token = config_override.get(ENV_METADATA_TOKEN)
-    elif should_skip_config():
+    elif config_utils.should_skip_config():
         gms_host = gms_host_env
         gms_token = gms_token_env
     else:
-        ensure_datahub_config()
-        gms_host_conf, gms_token_conf = get_details_from_config()
+        config_utils.ensure_datahub_config()
+        gms_host_conf, gms_token_conf = config_utils.get_details_from_config()
         gms_host = first_non_null([gms_host_env, gms_host_conf])
         gms_token = first_non_null([gms_token_env, gms_token_conf])
     return gms_host, gms_token
@@ -252,14 +154,18 @@ def parse_run_restli_response(response: requests.Response) -> dict:
         exit()
 
     if not isinstance(response_json, dict):
-        click.echo(f"Received error, please check your {CONDENSED_DATAHUB_CONFIG_PATH}")
+        click.echo(
+            f"Received error, please check your {config_utils.CONDENSED_DATAHUB_CONFIG_PATH}"
+        )
         click.echo()
         click.echo(response_json)
         exit()
 
     summary = response_json.get("value")
     if not isinstance(summary, dict):
-        click.echo(f"Received error, please check your {CONDENSED_DATAHUB_CONFIG_PATH}")
+        click.echo(
+            f"Received error, please check your {config_utils.CONDENSED_DATAHUB_CONFIG_PATH}"
+        )
         click.echo()
         click.echo(response_json)
         exit()
@@ -317,50 +223,7 @@ def post_rollback_endpoint(
     )
 
 
-def post_delete_references_endpoint(
-    payload_obj: dict,
-    path: str,
-    cached_session_host: Optional[Tuple[Session, str]] = None,
-) -> Tuple[int, List[Dict]]:
-    session, gms_host = cached_session_host or get_session_and_host()
-    url = gms_host + path
-
-    payload = json.dumps(payload_obj)
-    response = session.post(url, payload)
-    summary = parse_run_restli_response(response)
-    reference_count = summary.get("total", 0)
-    related_aspects = summary.get("relatedAspects", [])
-    return reference_count, related_aspects
-
-
-def post_delete_endpoint(
-    payload_obj: dict,
-    path: str,
-    cached_session_host: Optional[Tuple[Session, str]] = None,
-) -> typing.Tuple[str, int, int]:
-    session, gms_host = cached_session_host or get_session_and_host()
-    url = gms_host + path
-
-    return post_delete_endpoint_with_session_and_url(session, url, payload_obj)
-
-
-def post_delete_endpoint_with_session_and_url(
-    session: Session,
-    url: str,
-    payload_obj: dict,
-) -> typing.Tuple[str, int, int]:
-    payload = json.dumps(payload_obj)
-
-    response = session.post(url, payload)
-
-    summary = parse_run_restli_response(response)
-    urn: str = summary.get("urn", "")
-    rows_affected: int = summary.get("rows", 0)
-    timeseries_rows_affected: int = summary.get("timeseriesRows", 0)
-
-    return urn, rows_affected, timeseries_rows_affected
-
-
+@deprecated(reason="Use DataHubGraph.get_urns_by_filter instead")
 def get_urns_by_filter(
     platform: Optional[str],
     env: Optional[str] = None,
@@ -369,6 +232,7 @@ def get_urns_by_filter(
     include_removed: bool = False,
     only_soft_deleted: Optional[bool] = None,
 ) -> Iterable[str]:
+    # TODO: Replace with DataHubGraph call
     session, gms_host = get_session_and_host()
     endpoint: str = "/entities?action=search"
     url = gms_host + endpoint
@@ -574,6 +438,8 @@ def get_entity(
         raise Exception(
             f"urn {urn} does not seem to be a valid raw (starts with urn:) or encoded urn (starts with urn%3A)"
         )
+
+    # TODO: Replace with DataHubGraph.get_entity_raw.
     endpoint: str = f"/entitiesV2/{encoded_urn}"
 
     if aspect and len(aspect):
@@ -610,7 +476,7 @@ def post_entity(
     }
     payload = json.dumps(proposal)
     url = gms_host + endpoint
-    curl_command = _make_curl_command(session, "POST", url, payload)
+    curl_command = make_curl_command(session, "POST", url, payload)
     log.debug(
         "Attempting to emit to DataHub GMS; using curl equivalent to:\n%s",
         curl_command,
@@ -653,7 +519,7 @@ def get_latest_timeseries_aspect_values(
 
 def get_aspects_for_entity(
     entity_urn: str,
-    aspects: List[str] = [],
+    aspects: List[str],
     typed: bool = False,
     cached_session_host: Optional[Tuple[Session, str]] = None,
 ) -> Dict[str, Union[dict, _Aspect]]:
@@ -725,3 +591,95 @@ def make_shim_command(name: str, suggestion: str) -> click.Command:
         ctx.exit(1)
 
     return command
+
+
+def get_session_login_as(
+    username: str, password: str, frontend_url: str
+) -> requests.Session:
+    session = requests.Session()
+    headers = {
+        "Content-Type": "application/json",
+    }
+    system_auth = get_system_auth()
+    if system_auth is not None:
+        session.headers.update({"Authorization": system_auth})
+    else:
+        data = '{"username":"' + username + '", "password":"' + password + '"}'
+        response = session.post(f"{frontend_url}/logIn", headers=headers, data=data)
+        response.raise_for_status()
+    return session
+
+
+def _ensure_valid_gms_url_acryl_cloud(url: str) -> str:
+    if "acryl.io" not in url:
+        return url
+    if url.startswith("http://"):
+        url = url.replace("http://", "https://")
+    if url.endswith("acryl.io"):
+        url = f"{url}/gms"
+    return url
+
+
+def fixup_gms_url(url: str) -> str:
+    if url is None:
+        return ""
+    if url.endswith("/"):
+        url = url.rstrip("/")
+    url = _ensure_valid_gms_url_acryl_cloud(url)
+    return url
+
+
+def guess_frontend_url_from_gms_url(gms_url: str) -> str:
+    gms_url = fixup_gms_url(gms_url)
+    url = gms_url
+    if url.endswith("/gms"):
+        url = gms_url.rstrip("/gms")
+    if url.endswith("8080"):
+        url = url[:-4] + "9002"
+    return url
+
+
+def generate_access_token(
+    username: str,
+    password: str,
+    gms_url: str,
+    token_name: Optional[str] = None,
+    validity: str = "ONE_HOUR",
+) -> Tuple[str, str]:
+    frontend_url = guess_frontend_url_from_gms_url(gms_url)
+    session = get_session_login_as(
+        username=username,
+        password=password,
+        frontend_url=frontend_url,
+    )
+    now = datetime.now()
+    timestamp = now.astimezone().isoformat()
+    if token_name is None:
+        token_name = f"cli token {timestamp}"
+    json = {
+        "query": """mutation createAccessToken($input: CreateAccessTokenInput!) {
+            createAccessToken(input: $input) {
+              accessToken
+              metadata {
+                id
+                actorUrn
+                ownerUrn
+                name
+                description
+              }
+            }
+        }""",
+        "variables": {
+            "input": {
+                "type": "PERSONAL",
+                "actorUrn": f"urn:li:corpuser:{username}",
+                "duration": validity,
+                "name": token_name,
+            }
+        },
+    }
+    response = session.post(f"{frontend_url}/api/v2/graphql", json=json)
+    response.raise_for_status()
+    return token_name, response.json().get("data", {}).get("createAccessToken", {}).get(
+        "accessToken", None
+    )

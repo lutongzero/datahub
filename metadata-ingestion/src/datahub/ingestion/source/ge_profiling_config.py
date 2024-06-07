@@ -7,6 +7,7 @@ import pydantic
 from pydantic.fields import Field
 
 from datahub.configuration.common import AllowDenyPattern, ConfigModel
+from datahub.ingestion.source_config.operation_config import OperationConfig
 
 _PROFILING_FLAGS_TO_REPORT = {
     "turn_off_expensive_profiling_metrics",
@@ -21,6 +22,10 @@ logger = logging.getLogger(__name__)
 class GEProfilingConfig(ConfigModel):
     enabled: bool = Field(
         default=False, description="Whether profiling should be done."
+    )
+    operation_config: OperationConfig = Field(
+        default_factory=OperationConfig,
+        description="Experimental feature. To specify operation configs.",
     )
     limit: Optional[int] = Field(
         default=None,
@@ -115,6 +120,12 @@ class GEProfilingConfig(ConfigModel):
         description="Profile tables only if their row count is less then specified count. If set to `null`, no limit on the row count of tables to profile. Supported only in `snowflake` and `BigQuery`",
     )
 
+    profile_table_row_count_estimate_only: bool = Field(
+        default=False,
+        description="Use an approximate query for row count. This will be much faster but slightly "
+        "less accurate. Only supported for Postgres and MySQL. ",
+    )
+
     # The default of (5 * cpu_count) is adopted from the default max_workers
     # parameter of ThreadPoolExecutor. Given that profiling is often an I/O-bound
     # task, it may make sense to increase this default value in the future.
@@ -134,10 +145,39 @@ class GEProfilingConfig(ConfigModel):
     # Hidden option - used for debugging purposes.
     catch_exceptions: bool = Field(default=True, description="")
 
-    partition_profiling_enabled: bool = Field(default=True, description="")
+    partition_profiling_enabled: bool = Field(
+        default=True,
+        description="Whether to profile partitioned tables. Only BigQuery supports this. "
+        "If enabled, latest partition data is used for profiling.",
+    )
     partition_datetime: Optional[datetime.datetime] = Field(
         default=None,
-        description="For partitioned datasets profile only the partition which matches the datetime or profile the latest one if not set. Only Bigquery supports this.",
+        description="If specified, profile only the partition which matches this datetime. "
+        "If not specified, profile the latest partition. Only Bigquery supports this.",
+    )
+    use_sampling: bool = Field(
+        default=True,
+        description="Whether to profile column level stats on sample of table. Only BigQuery and Snowflake support this. "
+        "If enabled, profiling is done on rows sampled from table. Sampling is not done for smaller tables. ",
+    )
+
+    sample_size: int = Field(
+        default=10000,
+        description="Number of rows to be sampled from table for column level profiling."
+        "Applicable only if `use_sampling` is set to True.",
+    )
+
+    profile_external_tables: bool = Field(
+        default=False,
+        description="Whether to profile external tables. Only Snowflake and Redshift supports this.",
+    )
+
+    tags_to_ignore_sampling: Optional[List[str]] = pydantic.Field(
+        default=None,
+        description=(
+            "Fixed list of tags to ignore sampling."
+            " If not specified, tables will be sampled based on `use_sampling`."
+        ),
     )
 
     @pydantic.root_validator(pre=True)
@@ -150,7 +190,7 @@ class GEProfilingConfig(ConfigModel):
             del values["bigquery_temp_table_schema"]
         return values
 
-    @pydantic.root_validator()
+    @pydantic.root_validator(pre=True)
     def ensure_field_level_settings_are_normalized(
         cls: "GEProfilingConfig", values: Dict[str, Any]
     ) -> Dict[str, Any]:
@@ -161,7 +201,11 @@ class GEProfilingConfig(ConfigModel):
         if values.get("profile_table_level_only"):
             for field_level_metric in cls.__fields__:
                 if field_level_metric.startswith("include_field_"):
-                    values.setdefault(field_level_metric, False)
+                    if values.get(field_level_metric):
+                        raise ValueError(
+                            "Cannot enable field-level metrics if profile_table_level_only is set"
+                        )
+                    values[field_level_metric] = False
 
             assert (
                 max_num_fields_to_profile is None

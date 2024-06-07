@@ -1,30 +1,31 @@
+import functools
 import json
+import logging
 import os
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, List, Tuple
-from time import sleep
+
+from datahub.cli import cli_utils, env_utils
+from datahub.ingestion.graph.client import DatahubClientConfig, DataHubGraph
+from datahub.ingestion.run.pipeline import Pipeline
 from joblib import Parallel, delayed
 
 import requests_wrapper as requests
-
-from datahub.cli import cli_utils
-from datahub.ingestion.run.pipeline import Pipeline
+from tests.consistency_utils import wait_for_writes_to_sync
 
 TIME: int = 1581407189000
+logger = logging.getLogger(__name__)
 
 
 def get_frontend_session():
-    session = requests.Session()
-
-    headers = {
-        "Content-Type": "application/json",
-    }
     username, password = get_admin_credentials()
-    data = '{"username":"' + username + '", "password":"' + password + '"}'
-    response = session.post(f"{get_frontend_url()}/logIn", headers=headers, data=data)
-    response.raise_for_status()
+    return login_as(username, password)
 
-    return session
+
+def login_as(username: str, password: str):
+    return cli_utils.get_session_login_as(
+        username=username, password=password, frontend_url=get_frontend_url()
+    )
 
 
 def get_admin_username() -> str:
@@ -36,6 +37,10 @@ def get_admin_credentials():
         os.getenv("ADMIN_USERNAME", "datahub"),
         os.getenv("ADMIN_PASSWORD", "datahub"),
     )
+
+
+def get_root_urn():
+    return "urn:li:corpuser:datahub"
 
 
 def get_gms_url():
@@ -51,6 +56,7 @@ def get_kafka_broker_url():
 
 
 def get_kafka_schema_registry():
+    #  internal registry "http://localhost:8080/schema-registry/api/"
     return os.getenv("DATAHUB_KAFKA_SCHEMA_REGISTRY_URL") or "http://localhost:8081"
 
 
@@ -108,13 +114,26 @@ def ingest_file_via_rest(filename: str) -> Pipeline:
     )
     pipeline.run()
     pipeline.raise_from_status()
-    sleep(requests.ELASTICSEARCH_REFRESH_INTERVAL_SECONDS)
-
+    wait_for_writes_to_sync()
     return pipeline
 
 
+@functools.lru_cache(maxsize=1)
+def get_datahub_graph() -> DataHubGraph:
+    return DataHubGraph(DatahubClientConfig(server=get_gms_url()))
+
+
+def delete_urn(urn: str) -> None:
+    get_datahub_graph().hard_delete_entity(urn)
+
+
+def delete_urns(urns: List[str]) -> None:
+    for urn in urns:
+        delete_urn(urn)
+
+
 def delete_urns_from_file(filename: str, shared_data: bool = False) -> None:
-    if not cli_utils.get_boolean_env_variable("CLEANUP_DATA", True):
+    if not env_utils.get_boolean_env_variable("CLEANUP_DATA", True):
         print("Not cleaning data to save time")
         return
     session = requests.Session()
@@ -135,23 +154,13 @@ def delete_urns_from_file(filename: str, shared_data: bool = False) -> None:
             snapshot_union = entry["proposedSnapshot"]
             snapshot = list(snapshot_union.values())[0]
             urn = snapshot["urn"]
-        payload_obj = {"urn": urn}
-
-        cli_utils.post_delete_endpoint_with_session_and_url(
-            session,
-            get_gms_url() + "/entities?action=delete",
-            payload_obj,
-        )
+        delete_urn(urn)
 
     with open(filename) as f:
         d = json.load(f)
         Parallel(n_jobs=10)(delayed(delete)(entry) for entry in d)
 
-    # Deletes require 60 seconds when run between tests operating on common data, otherwise standard sync wait
-    if shared_data:
-        sleep(60)
-    else:
-        sleep(requests.ELASTICSEARCH_REFRESH_INTERVAL_SECONDS)
+    wait_for_writes_to_sync()
 
 
 # Fixed now value
@@ -178,7 +187,7 @@ def get_timestampmillis_at_start_of_day(relative_day_num: int) -> int:
 
 
 def get_strftime_from_timestamp_millis(ts_millis: int) -> str:
-    return datetime.fromtimestamp(ts_millis / 1000).strftime("%Y-%m-%d %H:%M:%S")
+    return datetime.fromtimestamp(ts_millis / 1000, tz=timezone.utc).isoformat()
 
 
 def create_datahub_step_state_aspect(
@@ -201,7 +210,7 @@ def create_datahub_step_state_aspect(
 
 
 def create_datahub_step_state_aspects(
-    username: str, onboarding_ids: str, onboarding_filename
+    username: str, onboarding_ids: List[str], onboarding_filename: str
 ) -> None:
     """
     For a specific user, creates dataHubStepState aspects for each onboarding id in the list

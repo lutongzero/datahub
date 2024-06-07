@@ -8,7 +8,8 @@ import urllib.request
 from dataclasses import dataclass
 from os.path import basename, dirname
 from pathlib import Path
-from typing import Any, Iterable, Optional, Union
+from typing import Any, Iterable, List, Optional, Union
+from urllib.parse import urlparse
 
 import jsonref
 from pydantic import AnyHttpUrl, DirectoryPath, FilePath, validator
@@ -16,6 +17,7 @@ from pydantic.fields import Field
 
 import datahub.metadata.schema_classes as models
 from datahub.configuration.common import ConfigModel
+from datahub.configuration.source_common import DatasetSourceConfigMixin
 from datahub.emitter.mce_builder import (
     make_dataplatform_instance_urn,
     make_dataset_urn_with_platform_instance,
@@ -29,13 +31,14 @@ from datahub.ingestion.api.decorators import (  # SourceCapability,; capability,
     platform_name,
     support_status,
 )
-from datahub.ingestion.api.source import SourceCapability
-from datahub.ingestion.api.workunit import MetadataWorkUnit, UsageStatsWorkUnit
+from datahub.ingestion.api.source import MetadataWorkUnitProcessor, SourceCapability
+from datahub.ingestion.api.workunit import MetadataWorkUnit
 from datahub.ingestion.extractor.json_ref_patch import title_swapping_callback
 from datahub.ingestion.extractor.json_schema_util import (
     JsonSchemaTranslator,
     get_schema_metadata,
 )
+from datahub.ingestion.source.common.subtypes import DatasetSubTypes
 from datahub.ingestion.source.state.entity_removal_state import GenericCheckpointState
 from datahub.ingestion.source.state.stale_entity_removal_handler import (
     StaleEntityRemovalHandler,
@@ -51,6 +54,16 @@ from datahub.utilities.urns.data_platform_urn import DataPlatformUrn
 logger = logging.getLogger(__name__)
 
 
+def is_url_valid(url: Optional[str]) -> bool:
+    if url is None:
+        return False
+    try:
+        result = urlparse(url)
+        return all([result.scheme, result.netloc])
+    except Exception:
+        return False
+
+
 class URIReplacePattern(ConfigModel):
     match: str = Field(
         description="Pattern to match on uri-s as part of reference resolution. See replace field",
@@ -60,7 +73,7 @@ class URIReplacePattern(ConfigModel):
     )
 
 
-class JsonSchemaSourceConfig(StatefulIngestionConfigBase):
+class JsonSchemaSourceConfig(StatefulIngestionConfigBase, DatasetSourceConfigMixin):
     path: Union[FilePath, DirectoryPath, AnyHttpUrl] = Field(
         description="Set this to a single file-path or a directory-path (for recursive traversal) or a remote url. e.g. https://json.schemastore.org/petstore-v1.0.json"
     )
@@ -199,7 +212,7 @@ class JsonSchemaSource(StatefulIngestionSourceBase):
         """Loads the given schema file"""
         path = Path(filename).resolve()
         base_path = dirname(str(path))
-        base_uri = "file://{}/".format(base_path)
+        base_uri = f"file://{base_path}/"
 
         with open(path) as schema_file:
             logger.info(f"Opening file {path}")
@@ -230,20 +243,9 @@ class JsonSchemaSource(StatefulIngestionSourceBase):
         return jsonref.jsonloader(uri, **kwargs)
 
     def __init__(self, ctx: PipelineContext, config: JsonSchemaSourceConfig):
-        super(JsonSchemaSource, self).__init__(ctx=ctx, config=config)
+        super().__init__(ctx=ctx, config=config)
         self.config = config
-        self.stale_entity_removal_handler = StaleEntityRemovalHandler(
-            source=self,
-            config=self.config,
-            state_type_class=JsonSchemaCheckpointState,
-            pipeline_name=self.ctx.pipeline_name,
-            run_id=self.ctx.run_id,
-        )
         self.report = StaleEntityRemovalSourceReport()
-
-    def _report_and_return(self, wu: MetadataWorkUnit) -> MetadataWorkUnit:
-        self.report.report_workunit(wu)
-        return wu
 
     def _load_one_file(
         self, ref_loader: Any, browse_prefix: str, root_dir: Path, file_name: str
@@ -280,73 +282,65 @@ class JsonSchemaSource(StatefulIngestionSourceBase):
                 platform=self.config.platform,
                 name=dataset_name,
                 platform_instance=self.config.platform_instance,
+                env=self.config.env,
             )
-            yield self._report_and_return(
-                MetadataChangeProposalWrapper(
-                    entityUrn=dataset_urn, aspect=meta
-                ).as_workunit()
-            )
+            yield MetadataChangeProposalWrapper(
+                entityUrn=dataset_urn, aspect=meta
+            ).as_workunit()
 
-            # status
-            yield self._report_and_return(
-                MetadataChangeProposalWrapper(
-                    entityUrn=dataset_urn, aspect=models.StatusClass(removed=False)
-                ).as_workunit()
-            )
+            yield MetadataChangeProposalWrapper(
+                entityUrn=dataset_urn, aspect=models.StatusClass(removed=False)
+            ).as_workunit()
 
-            # datasetProperties
-            yield self._report_and_return(
-                MetadataChangeProposalWrapper(
+            external_url = JsonSchemaTranslator._get_id_from_any_schema(schema_dict)
+            if not is_url_valid(external_url):
+                external_url = None
+
+            yield MetadataChangeProposalWrapper(
+                entityUrn=dataset_urn,
+                aspect=models.DatasetPropertiesClass(
+                    externalUrl=external_url,
+                    name=dataset_simple_name,
+                    description=JsonSchemaTranslator._get_description_from_any_schema(
+                        schema_dict
+                    ),
+                ),
+            ).as_workunit()
+
+            yield MetadataChangeProposalWrapper(
+                entityUrn=dataset_urn,
+                aspect=models.SubTypesClass(typeNames=[DatasetSubTypes.SCHEMA]),
+            ).as_workunit()
+
+            browse_path = browse_prefix + dirname(schema_type)
+            yield MetadataChangeProposalWrapper(
+                entityUrn=dataset_urn,
+                aspect=models.BrowsePathsClass(paths=[browse_path]),
+            ).as_workunit()
+
+            if self.config.platform_instance:
+                yield MetadataChangeProposalWrapper(
                     entityUrn=dataset_urn,
-                    aspect=models.DatasetPropertiesClass(
-                        externalUrl=JsonSchemaTranslator._get_id_from_any_schema(
-                            schema_dict
+                    aspect=models.DataPlatformInstanceClass(
+                        platform=str(
+                            DataPlatformUrn.create_from_id(self.config.platform)
                         ),
-                        name=dataset_simple_name,
-                        description=JsonSchemaTranslator._get_description_from_any_schema(
-                            schema_dict
+                        instance=make_dataplatform_instance_urn(
+                            platform=self.config.platform,
+                            instance=self.config.platform_instance,
                         ),
                     ),
                 ).as_workunit()
-            )
 
-            # subTypes
-            yield self._report_and_return(
-                MetadataChangeProposalWrapper(
-                    entityUrn=dataset_urn,
-                    aspect=models.SubTypesClass(typeNames=["schema"]),
-                ).as_workunit()
-            )
+    def get_workunit_processors(self) -> List[Optional[MetadataWorkUnitProcessor]]:
+        return [
+            *super().get_workunit_processors(),
+            StaleEntityRemovalHandler.create(
+                self, self.config, self.ctx
+            ).workunit_processor,
+        ]
 
-            browse_path = browse_prefix + dirname(schema_type)
-            yield self._report_and_return(
-                MetadataChangeProposalWrapper(
-                    entityUrn=dataset_urn,
-                    aspect=models.BrowsePathsClass(paths=[browse_path]),
-                ).as_workunit()
-            )
-
-            if self.config.platform_instance:
-                yield self._report_and_return(
-                    MetadataChangeProposalWrapper(
-                        entityUrn=dataset_urn,
-                        aspect=models.DataPlatformInstanceClass(
-                            platform=str(
-                                DataPlatformUrn.create_from_id(self.config.platform)
-                            ),
-                            instance=make_dataplatform_instance_urn(
-                                platform=self.config.platform,
-                                instance=self.config.platform_instance,
-                            ),
-                        ),
-                    ).as_workunit()
-                )
-
-            self.stale_entity_removal_handler.add_entity_to_state(
-                type="_", urn=dataset_urn
-            )
-
-    def get_workunits(self) -> Iterable[Union[MetadataWorkUnit, UsageStatsWorkUnit]]:
+    def get_workunits_internal(self) -> Iterable[MetadataWorkUnit]:
         if self.config.uri_replace_pattern:
             ref_loader = functools.partial(
                 self.stringreplaceloader,
@@ -390,9 +384,6 @@ class JsonSchemaSource(StatefulIngestionSourceBase):
                     str(self.config.path), f"Failed to process due to {e}"
                 )
                 logger.error(f"Failed to process file {self.config.path}", exc_info=e)
-
-        # Clean up stale entities at the end
-        yield from self.stale_entity_removal_handler.gen_removed_entity_workunits()
 
     def get_report(self):
         return self.report

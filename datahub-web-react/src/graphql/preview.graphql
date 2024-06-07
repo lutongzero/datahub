@@ -35,8 +35,12 @@ fragment entityPreview on Entity {
         domain {
             ...entityDomain
         }
+        ...entityDataProduct
         deprecation {
             ...deprecationFields
+        }
+        health {
+            ...entityHealth
         }
     }
     ... on CorpUser {
@@ -99,11 +103,15 @@ fragment entityPreview on Entity {
         domain {
             ...entityDomain
         }
+        ...entityDataProduct
         deprecation {
             ...deprecationFields
         }
         subTypes {
             typeNames
+        }
+        health {
+            ...entityHealth
         }
     }
     ... on Chart {
@@ -139,9 +147,16 @@ fragment entityPreview on Entity {
         domain {
             ...entityDomain
         }
+        ...entityDataProduct
         deprecation {
             ...deprecationFields
         }
+        subTypes {
+            typeNames
+        }
+        health {
+            ...entityHealth
+        }    
     }
     ... on DataFlow {
         urn
@@ -172,8 +187,12 @@ fragment entityPreview on Entity {
         domain {
             ...entityDomain
         }
+        ...entityDataProduct
         deprecation {
             ...deprecationFields
+        }
+        health {
+            ...entityHealth
         }
     }
     ... on DataJob {
@@ -202,8 +221,15 @@ fragment entityPreview on Entity {
         domain {
             ...entityDomain
         }
+        ...entityDataProduct
         deprecation {
             ...deprecationFields
+        }
+        subTypes {
+            typeNames
+        }
+        health {
+            ...entityHealth
         }
     }
     ... on GlossaryTerm {
@@ -269,6 +295,16 @@ fragment entityPreview on Entity {
             ...deprecationFields
         }
     }
+    ... on MLFeature {
+        name
+        description
+        ownership {
+            ...ownershipFields
+        }
+        deprecation {
+            ...deprecationFields
+        }
+    }
     ... on MLModelGroup {
         name
         origin
@@ -299,7 +335,12 @@ fragment entityPreview on Entity {
         urn
         properties {
             name
+            description
         }
+        parentDomains {
+            ...parentDomainsFields
+        }
+        ...domainEntitiesFields
     }
     ... on Container {
         ...entityContainer

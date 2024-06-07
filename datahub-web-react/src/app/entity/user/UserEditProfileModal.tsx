@@ -1,7 +1,8 @@
 import React, { useEffect, useState } from 'react';
-import { message, Button, Input, Modal, Typography, Form } from 'antd';
+import { message, Button, Input, Modal, Typography, Form, Tooltip } from 'antd';
 import { useUpdateCorpUserPropertiesMutation } from '../../../graphql/user.generated';
 import { useEnterKeyListener } from '../../shared/useEnterKeyListener';
+import { useAppConfig } from '../../useAppConfig';
 
 type PropsData = {
     name: string | undefined;
@@ -24,6 +25,8 @@ type Props = {
 export const USER_NAME_REGEX = new RegExp('^[a-zA-Z ]*$');
 
 export default function UserEditProfileModal({ visible, onClose, onSave, editModalData }: Props) {
+    const { config } = useAppConfig();
+    const { readOnlyModeEnabled } = config.featureFlags;
     const [updateCorpUserPropertiesMutation] = useUpdateCorpUserPropertiesMutation();
     const [form] = Form.useForm();
 
@@ -59,11 +62,7 @@ export default function UserEditProfileModal({ visible, onClose, onSave, editMod
                 },
             },
         })
-            .catch((e) => {
-                message.destroy();
-                message.error({ content: `Failed to Save changes!: \n ${e.message || ''}`, duration: 3 });
-            })
-            .finally(() => {
+            .then(() => {
                 message.success({
                     content: `Changes saved.`,
                     duration: 3,
@@ -80,6 +79,10 @@ export default function UserEditProfileModal({ visible, onClose, onSave, editMod
                     phone: '',
                     urn: '',
                 });
+            })
+            .catch((e) => {
+                message.destroy();
+                message.error({ content: `Failed to Save changes!: \n ${e.message || ''}`, duration: 3 });
             });
         onClose();
     };
@@ -135,6 +138,7 @@ export default function UserEditProfileModal({ visible, onClose, onSave, editMod
                         placeholder="John Smith"
                         value={data.name}
                         onChange={(event) => setData({ ...data, name: event.target.value })}
+                        disabled={readOnlyModeEnabled}
                     />
                 </Form.Item>
                 <Form.Item
@@ -147,20 +151,28 @@ export default function UserEditProfileModal({ visible, onClose, onSave, editMod
                         placeholder="Data Analyst"
                         value={data.title}
                         onChange={(event) => setData({ ...data, title: event.target.value })}
+                        disabled={readOnlyModeEnabled}
                     />
                 </Form.Item>
-                <Form.Item
-                    name="image"
-                    label={<Typography.Text strong>Image URL</Typography.Text>}
-                    rules={[{ whitespace: true }, { type: 'url', message: 'not valid url' }]}
-                    hasFeedback
+                <Tooltip
+                    title="Editing image URL has been disabled."
+                    overlayStyle={readOnlyModeEnabled ? {} : { display: 'none' }}
+                    placement="bottom"
                 >
-                    <Input
-                        placeholder="https://www.example.com/photo.png"
-                        value={data.image}
-                        onChange={(event) => setData({ ...data, image: event.target.value })}
-                    />
-                </Form.Item>
+                    <Form.Item
+                        name="image"
+                        label={<Typography.Text strong>Image URL</Typography.Text>}
+                        rules={[{ whitespace: true }, { type: 'url', message: 'not valid url' }]}
+                        hasFeedback
+                    >
+                        <Input
+                            placeholder="https://www.example.com/photo.png"
+                            value={data.image}
+                            onChange={(event) => setData({ ...data, image: event.target.value })}
+                            disabled={readOnlyModeEnabled}
+                        />
+                    </Form.Item>
+                </Tooltip>
                 <Form.Item
                     name="team"
                     label={<Typography.Text strong>Team</Typography.Text>}
@@ -170,6 +182,7 @@ export default function UserEditProfileModal({ visible, onClose, onSave, editMod
                         placeholder="Product Engineering"
                         value={data.team}
                         onChange={(event) => setData({ ...data, team: event.target.value })}
+                        disabled={readOnlyModeEnabled}
                     />
                 </Form.Item>
                 <Form.Item
@@ -193,6 +206,7 @@ export default function UserEditProfileModal({ visible, onClose, onSave, editMod
                         placeholder="john.smith@example.com"
                         value={data.email}
                         onChange={(event) => setData({ ...data, email: event.target.value })}
+                        disabled={readOnlyModeEnabled}
                     />
                 </Form.Item>
                 <Form.Item
@@ -205,6 +219,7 @@ export default function UserEditProfileModal({ visible, onClose, onSave, editMod
                         placeholder="john_smith"
                         value={data.slack}
                         onChange={(event) => setData({ ...data, slack: event.target.value })}
+                        disabled={readOnlyModeEnabled}
                     />
                 </Form.Item>
                 <Form.Item
@@ -226,6 +241,7 @@ export default function UserEditProfileModal({ visible, onClose, onSave, editMod
                         placeholder="444-999-9999"
                         value={data.phone}
                         onChange={(event) => setData({ ...data, phone: event.target.value })}
+                        disabled={readOnlyModeEnabled}
                     />
                 </Form.Item>
             </Form>

@@ -4,8 +4,8 @@ import Tour from 'reactour';
 import { useBatchUpdateStepStatesMutation } from '../../graphql/step.generated';
 import { EducationStepsContext } from '../../providers/EducationStepsContext';
 import { StepStateResult } from '../../types.generated';
-import { useGetAuthenticatedUser } from '../useGetAuthenticatedUser';
-import { convertStepId, getStepsToRender } from './utils';
+import { useUserContext } from '../context/useUserContext';
+import { convertStepId, getConditionalStepIdsToAdd, getStepsToRender } from './utils';
 
 type Props = {
     stepIds: string[];
@@ -13,7 +13,7 @@ type Props = {
 
 export const OnboardingTour = ({ stepIds }: Props) => {
     const { educationSteps, setEducationSteps, educationStepIdsAllowlist } = useContext(EducationStepsContext);
-    const userUrn = useGetAuthenticatedUser()?.corpUser.urn;
+    const userUrn = useUserContext()?.user?.urn;
     const [isOpen, setIsOpen] = useState(true);
     const [reshow, setReshow] = useState(false);
     const accentColor = '#5cb7b7';
@@ -42,7 +42,10 @@ export const OnboardingTour = ({ stepIds }: Props) => {
     function closeTour() {
         setIsOpen(false);
         setReshow(false);
-        const convertedIds = filteredStepIds.map((id) => convertStepId(id, userUrn || ''));
+        // add conditional steps where its pre-requisite step ID is in our list of IDs we mark as completed
+        const conditionalStepIds = getConditionalStepIdsToAdd(stepIds, filteredStepIds);
+        const finalStepIds = [...filteredStepIds, ...conditionalStepIds];
+        const convertedIds = finalStepIds.map((id) => convertStepId(id, userUrn || ''));
         const stepStates = convertedIds.map((id) => ({ id, properties: [] }));
         batchUpdateStepStates({ variables: { input: { states: stepStates } } }).then(() => {
             const results = convertedIds.map((id) => ({ id, properties: [{}] } as StepStateResult));

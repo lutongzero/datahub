@@ -5,6 +5,9 @@ import { useEntityData, useRefetch } from '../EntityContext';
 import { useEntityRegistry } from '../../../useEntityRegistry';
 import { useUpdateParentNodeMutation } from '../../../../graphql/glossary.generated';
 import NodeParentSelect from './NodeParentSelect';
+import { useGlossaryEntityData } from '../GlossaryEntityContext';
+import { getGlossaryRootToUpdate, getParentNodeToUpdate, updateGlossarySidebar } from '../../../glossary/utils';
+import { getModalDomContainer } from '../../../../utils/focus';
 
 const StyledItem = styled(Form.Item)`
     margin-bottom: 0;
@@ -16,12 +19,12 @@ const OptionalWrapper = styled.span`
 
 interface Props {
     onClose: () => void;
-    refetchData?: () => void;
 }
 
 function MoveGlossaryEntityModal(props: Props) {
-    const { onClose, refetchData } = props;
-    const { urn: entityDataUrn, entityType } = useEntityData();
+    const { onClose } = props;
+    const { urn: entityDataUrn, entityData, entityType } = useEntityData();
+    const { isInGlossaryContext, urnsToUpdate, setUrnsToUpdate } = useGlossaryEntityData();
     const [form] = Form.useForm();
     const entityRegistry = useEntityRegistry();
     const [selectedParentUrn, setSelectedParentUrn] = useState('');
@@ -46,8 +49,10 @@ function MoveGlossaryEntityModal(props: Props) {
                         duration: 2,
                     });
                     refetch();
-                    if (refetchData) {
-                        refetchData();
+                    if (isInGlossaryContext) {
+                        const oldParentToUpdate = getParentNodeToUpdate(entityData, entityType);
+                        const newParentToUpdate = selectedParentUrn || getGlossaryRootToUpdate(entityType);
+                        updateGlossarySidebar([oldParentToUpdate, newParentToUpdate], urnsToUpdate, setUrnsToUpdate);
                     }
                 }, 2000);
             })
@@ -60,6 +65,7 @@ function MoveGlossaryEntityModal(props: Props) {
 
     return (
         <Modal
+            data-testid="move-glossary-entity-modal"
             title="Move"
             visible
             onCancel={onClose}
@@ -68,9 +74,12 @@ function MoveGlossaryEntityModal(props: Props) {
                     <Button onClick={onClose} type="text">
                         Cancel
                     </Button>
-                    <Button onClick={moveGlossaryEntity}>Move</Button>
+                    <Button onClick={moveGlossaryEntity} data-testid="glossary-entity-modal-move-button">
+                        Move
+                    </Button>
                 </>
             }
+            getContainer={getModalDomContainer}
         >
             <Form form={form} initialValues={{}} layout="vertical">
                 <Form.Item
@@ -85,6 +94,7 @@ function MoveGlossaryEntityModal(props: Props) {
                             selectedParentUrn={selectedParentUrn}
                             setSelectedParentUrn={setSelectedParentUrn}
                             isMoving
+                            autofocus
                         />
                     </StyledItem>
                 </Form.Item>

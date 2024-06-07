@@ -67,8 +67,8 @@ export default function PolicyDetailsModal({ policy, visible, onClose, privilege
     const isMetadataPolicy = policy?.type === PolicyType.Metadata;
 
     const resources = convertLegacyResourceFilter(policy?.resources);
-    const resourceTypes = getFieldValues(resources?.filter, 'RESOURCE_TYPE') || [];
-    const resourceEntities = getFieldValues(resources?.filter, 'RESOURCE_URN') || [];
+    const resourceTypes = getFieldValues(resources?.filter, 'TYPE') || [];
+    const resourceEntities = getFieldValues(resources?.filter, 'URN') || [];
     const domains = getFieldValues(resources?.filter, 'DOMAIN') || [];
 
     const {
@@ -94,12 +94,29 @@ export default function PolicyDetailsModal({ policy, visible, onClose, privilege
                 <Link
                     target="_blank"
                     rel="noopener noreferrer"
+                    // eslint-disable-next-line @typescript-eslint/no-non-null-assertion
                     to={() => `${entityRegistry.getEntityUrl(criterionValue.entity!.type, criterionValue.value)}`}
                 >
                     {getDisplayName(criterionValue.entity)}
                 </Link>
             )) || <Typography.Text>{criterionValue.value}</Typography.Text>
         );
+    };
+
+    const resourceOwnersField = (actors) => {
+        if (!actors?.resourceOwners) {
+            return <PoliciesTag>No</PoliciesTag>;
+        }
+        if ((actors?.resolvedOwnershipTypes?.length ?? 0) > 0) {
+            return (
+                <div>
+                    {actors?.resolvedOwnershipTypes?.map((type) => (
+                        <PoliciesTag>{type.info.name}</PoliciesTag>
+                    ))}
+                </div>
+            );
+        }
+        return <PoliciesTag>Yes - All owners</PoliciesTag>;
     };
 
     return (
@@ -179,7 +196,7 @@ export default function PolicyDetailsModal({ policy, visible, onClose, privilege
                 <div>
                     <Typography.Title level={5}>Applies to Owners</Typography.Title>
                     <ThinDivider />
-                    <PoliciesTag>{policy?.actors?.resourceOwners ? 'True' : 'False'}</PoliciesTag>
+                    {resourceOwnersField(policy?.actors)}
                 </div>
                 <div>
                     <Typography.Title level={5}>Applies to Users</Typography.Title>

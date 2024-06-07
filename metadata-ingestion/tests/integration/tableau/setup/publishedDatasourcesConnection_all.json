@@ -5,6 +5,7 @@
                 {
                     "__typename": "PublishedDatasource",
                     "id": "00cce29f-b561-bb41-3557-8e19660bb5dd",
+                    "luid":"ffd72f16-004a-4a7d-8f5b-a8fd18d4317d",
                     "name": "test publish datasource",
                     "hasExtracts": false,
                     "extractLastRefreshTime": null,
@@ -39,7 +40,9 @@
                             "fullName": "customer",
                             "connectionType": "postgres",
                             "description": "",
-                            "columns": []
+                             "columnsConnection": {
+                                "totalCount": 0
+                            }
                         },
                         {
                             "id": "3cdd0522-44ef-62eb-ba52-71545c258344",
@@ -50,8 +53,7 @@
                             "schema": "",
                             "fullName": "payment",
                             "connectionType": "postgres",
-                            "description": "",
-                            "columns": []
+                            "description": ""
                         },
                         {
                             "id": "7df39af9-6767-4c9c-4120-155a024de062",
@@ -62,8 +64,7 @@
                             "schema": "",
                             "fullName": "staff",
                             "connectionType": "postgres",
-                            "description": "",
-                            "columns": []
+                            "description": ""
                         }
                     ],
                     "fields": [
@@ -171,8 +172,7 @@
                             "dataType": "TABLE",
                             "defaultFormat": null,
                             "aggregation": null,
-                            "upstreamFields": [],
-                            "columns": []
+                            "upstreamFields": []
                         },
                         {
                             "__typename": "ColumnField",
@@ -250,12 +250,18 @@
                     },
                     "description": "description for test publish datasource",
                     "uri": "sites/4989/datasources/155429",
-                    "projectName": "default"
+                    "projectName": "default",
+                    "tags": [
+                        {
+                            "name": "tag on published datasource"
+                        }
+                    ]
                 },
                 {
                     "__typename": "PublishedDatasource",
                     "id": "6cbbeeb2-9f3a-00f6-2342-17139d6e97ae",
                     "name": "Superstore Datasource",
+                    "luid": "db86f6cc-9c0e-400f-9fe0-0777f31c6ae2",
                     "hasExtracts": false,
                     "extractLastRefreshTime": null,
                     "extractLastIncrementalUpdateTime": null,
@@ -289,16 +295,9 @@
                             "fullName": "[People$]",
                             "connectionType": "excel-direct",
                             "description": "",
-                            "columns": [
-                                {
-                                    "name": "Person",
-                                    "remoteType": "WSTR"
-                                },
-                                {
-                                    "name": "Region",
-                                    "remoteType": "WSTR"
-                                }
-                            ]
+                             "columnsConnection": {
+                                "totalCount": 2
+                            }
                         },
                         {
                             "id": "19be3c28-8e4d-ebac-b44d-8f0851d9f206",
@@ -310,16 +309,9 @@
                             "fullName": "[Returns$]",
                             "connectionType": "excel-direct",
                             "description": "",
-                            "columns": [
-                                {
-                                    "name": "Returned",
-                                    "remoteType": "WSTR"
-                                },
-                                {
-                                    "name": "Order ID",
-                                    "remoteType": "WSTR"
-                                }
-                            ]
+                             "columnsConnection": {
+                                "totalCount": 2
+                            }
                         },
                         {
                             "id": "b0e0c3eb-6e53-e0f5-ded1-478d5d9f7281",
@@ -331,92 +323,9 @@
                             "fullName": "[Orders$]",
                             "connectionType": "excel-direct",
                             "description": "",
-                            "columns": [
-                                {
-                                    "name": "Product ID",
-                                    "remoteType": "WSTR"
-                                },
-                                {
-                                    "name": "Category",
-                                    "remoteType": "WSTR"
-                                },
-                                {
-                                    "name": "Postal Code",
-                                    "remoteType": "I8"
-                                },
-                                {
-                                    "name": "City",
-                                    "remoteType": "WSTR"
-                                },
-                                {
-                                    "name": "Quantity",
-                                    "remoteType": "I8"
-                                },
-                                {
-                                    "name": "State",
-                                    "remoteType": "WSTR"
-                                },
-                                {
-                                    "name": "Order Date",
-                                    "remoteType": "DATE"
-                                },
-                                {
-                                    "name": "Customer Name",
-                                    "remoteType": "WSTR"
-                                },
-                                {
-                                    "name": "Country/Region",
-                                    "remoteType": "WSTR"
-                                },
-                                {
-                                    "name": "Sales",
-                                    "remoteType": "R8"
-                                },
-                                {
-                                    "name": "Segment",
-                                    "remoteType": "WSTR"
-                                },
-                                {
-                                    "name": "Sub-Category",
-                                    "remoteType": "WSTR"
-                                },
-                                {
-                                    "name": "Profit",
-                                    "remoteType": "R8"
-                                },
-                                {
-                                    "name": "Product Name",
-                                    "remoteType": "WSTR"
-                                },
-                                {
-                                    "name": "Customer ID",
-                                    "remoteType": "WSTR"
-                                },
-                                {
-                                    "name": "Order ID",
-                                    "remoteType": "WSTR"
-                                },
-                                {
-                                    "name": "Row ID",
-                                    "remoteType": "I8"
-                                },
-                                {
-                                    "name": "Discount",
-                                    "remoteType": "R8"
-                                },
-                                {
-                                    "name": "Ship Date",
-                                    "remoteType": "DATE"
-                                },
-                                {
-                                    "name": "Ship Mode",
-                                    "remoteType": "WSTR"
-                                },
-                                {
-                                    "name": "Region",
-                                    "remoteType": "WSTR"
-                                }
-                            ]
+                             "columnsConnection": {
+                                "totalCount": 21
+                            }                        
                         }
                     ],
                     "fields": [
@@ -448,8 +357,7 @@
                             "dataType": "TABLE",
                             "defaultFormat": null,
                             "aggregation": null,
-                            "upstreamFields": [],
-                            "columns": []
+                            "upstreamFields": []
                         },
                         {
                             "__typename": "ColumnField",
@@ -633,8 +541,7 @@
                             "dataType": "TABLE",
                             "defaultFormat": null,
                             "aggregation": null,
-                            "upstreamFields": [],
-                            "columns": []
+                            "upstreamFields": []
                         },
                         {
                             "__typename": "ColumnField",
@@ -852,8 +759,7 @@
                             "dataType": "TABLE",
                             "defaultFormat": null,
                             "aggregation": null,
-                            "upstreamFields": [],
-                            "columns": []
+                            "upstreamFields": []
                         },
                         {
                             "__typename": "ColumnField",

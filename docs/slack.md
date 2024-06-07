@@ -2,11 +2,15 @@
 
 The DataHub Slack is a thriving and rapidly growing community - we can't wait for you to join us!
 
-_[Sign up here](https://slack.datahubproject.io) to join us on Slack and to subscribe to the DataHub Community newsletter. Already a member? [Log in here](https://slack.datahubproject.io)._
+_[Sign up here](https://datahubproject.io/slack?utm_source=docs&utm_medium=page_link&utm_campaign=docs_page_link) to join us on Slack and to subscribe to the DataHub Community newsletter. Already a member? [Log in here](https://datahubproject.io/slack?utm_source=docs&utm_medium=docs&utm_campaign=docs_page_link)._
 
 ## Slack Guidelines
 
 In addition to our [Code of Conduct](CODE_OF_CONDUCT.md), we expect all Slack Community Members to respect the following guidelines:
+
+### Avoid using DMs and @mentions
+
+Whenever possible, post your questions and responses in public channels so other Community Members can benefit from the conversation and outcomes. Limit the use of @mentions of other Community Members to be considerate of notification noise.
 
 ### Make use of threads
 

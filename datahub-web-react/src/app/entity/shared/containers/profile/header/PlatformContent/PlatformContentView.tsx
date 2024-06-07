@@ -2,29 +2,31 @@ import React from 'react';
 import styled from 'styled-components';
 import { Typography, Image } from 'antd';
 import { Maybe } from 'graphql/jsutils/Maybe';
-import { Container, GlossaryNode } from '../../../../../../../types.generated';
+import { Container, Entity } from '../../../../../../../types.generated';
 import { ANTD_GRAY } from '../../../../constants';
 import ContainerLink from './ContainerLink';
-import ParentNodesView, {
+import {
     StyledRightOutlined,
     ParentNodesWrapper as ParentContainersWrapper,
     Ellipsis,
     StyledTooltip,
 } from './ParentNodesView';
+import ParentEntities from '../../../../../../search/filters/ParentEntities';
 
-const LogoIcon = styled.span`
+export const LogoIcon = styled.span`
     display: flex;
+    gap: 4px;
     margin-right: 8px;
 `;
 
-const PreviewImage = styled(Image)`
+export const PreviewImage = styled(Image)`
     max-height: 17px;
     width: auto;
     object-fit: contain;
     background-color: transparent;
 `;
 
-const PlatformContentWrapper = styled.div`
+export const PlatformContentWrapper = styled.div`
     display: flex;
     align-items: center;
     margin: 0 8px 6px 0;
@@ -32,7 +34,7 @@ const PlatformContentWrapper = styled.div`
     flex: 1;
 `;
 
-const PlatformText = styled(Typography.Text)`
+export const PlatformText = styled(Typography.Text)`
     font-size: 12px;
     line-height: 20px;
     font-weight: 700;
@@ -74,14 +76,14 @@ interface Props {
     typeIcon?: JSX.Element;
     entityType?: string;
     parentContainers?: Maybe<Container>[] | null;
-    parentNodes?: GlossaryNode[] | null;
+    parentEntities?: Entity[] | null;
     parentContainersRef: React.RefObject<HTMLDivElement>;
     areContainersTruncated: boolean;
 }
 
 function PlatformContentView(props: Props) {
     const {
-        parentNodes,
+        parentEntities,
         platformName,
         platformLogoUrl,
         platformNames,
@@ -102,7 +104,7 @@ function PlatformContentView(props: Props) {
         <PlatformContentWrapper>
             {typeIcon && <LogoIcon>{typeIcon}</LogoIcon>}
             <PlatformText>{entityType}</PlatformText>
-            {(!!platformName || !!instanceId || !!parentContainers?.length || !!parentNodes?.length) && (
+            {(!!platformName || !!instanceId || !!parentContainers?.length || !!parentEntities?.length) && (
                 <PlatformDivider />
             )}
             {platformName && (
@@ -145,7 +147,7 @@ function PlatformContentView(props: Props) {
                 </ParentContainersWrapper>
                 {directParentContainer && <ContainerLink container={directParentContainer} />}
             </StyledTooltip>
-            <ParentNodesView parentNodes={parentNodes} />
+            <ParentEntities parentEntities={parentEntities || []} numVisible={3} />
         </PlatformContentWrapper>
     );
 }

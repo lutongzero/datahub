@@ -1,5 +1,5 @@
 import { execSync } from "child_process";
-import * as matter from "gray-matter";
+import matter from "gray-matter";
 import * as fs from "fs";
 import * as path from "path";
 import { Octokit } from "@octokit/rest";
@@ -16,6 +16,7 @@ const GITHUB_BROWSE_URL =
   "https://github.com/datahub-project/datahub/blob/master";
 
 const OUTPUT_DIRECTORY = "docs";
+const STATIC_DIRECTORY = "genStatic/artifacts";
 
 const SIDEBARS_DEF_PATH = "./sidebars.js";
 const sidebars = require(SIDEBARS_DEF_PATH);
@@ -25,7 +26,7 @@ const sidebars_text = fs.readFileSync(SIDEBARS_DEF_PATH).toString();
 const MyOctokit = Octokit.plugin(retry).plugin(throttling);
 const octokit = new MyOctokit({
   throttle: {
-    onRateLimit: (retryAfter, options) => {
+    onRateLimit: (retryAfter: number, options: any) => {
       // Retry twice after rate limit is hit.
       if (options.request.retryCount <= 2) {
         return true;
@@ -65,7 +66,7 @@ function list_markdown_files(): string[] {
     .trim()
     .split("\n");
   let all_generated_markdown_files = execSync(
-    "cd .. && ls docs/generated/**/**/*.md"
+    "cd .. && ls docs/generated/**/**/*.md && ls docs/generated/**/*.md"
   )
     .toString()
     .trim()
@@ -119,11 +120,11 @@ function list_markdown_files(): string[] {
     /^metadata-models\/docs\//, // these are used to generate docs, so we don't want to consider them here
     /^metadata-ingestion\/archived\//, // these are archived, so we don't want to consider them here
     /^metadata-ingestion\/docs\/sources\//, // these are used to generate docs, so we don't want to consider them here
+    /^metadata-ingestion\/tests\//,
     /^metadata-ingestion-examples\//,
     /^docker\/(?!README|datahub-upgrade|airflow\/local_airflow)/, // Drop all but a few docker docs.
     /^docs\/docker\/README\.md/, // This one is just a pointer to another file.
     /^docs\/README\.md/, // This one is just a pointer to the hosted docs site.
-    /^SECURITY\.md$/,
     /^\s*$/, //Empty string
   ];
 
@@ -155,7 +156,7 @@ function get_slug(filepath: string): string {
   // There's no need to do this cleanup, but it does make the URLs a bit more aesthetic.
 
   if (filepath in hardcoded_slugs) {
-    return hardcoded_slugs[filepath];
+    return hardcoded_slugs[filepath as keyof typeof hardcoded_slugs];
   }
 
   let slug = get_id(filepath);
@@ -172,7 +173,6 @@ function get_slug(filepath: string): string {
 
 const hardcoded_titles = {
   "README.md": "Introduction",
-  "docs/demo.md": "See DataHub in Action",
   "docs/actions/README.md": "Introduction",
   "docs/actions/concepts.md": "Concepts",
   "docs/actions/quickstart.md": "Quickstart",
@@ -217,9 +217,10 @@ function markdown_guess_title(
 
   let title: string;
   if (filepath in hardcoded_titles) {
-    title = hardcoded_titles[filepath];
+    title = hardcoded_titles[filepath as keyof typeof hardcoded_titles];
     if (filepath in hardcoded_descriptions) {
-      contents.data.description = hardcoded_descriptions[filepath];
+      contents.data.description =
+        hardcoded_descriptions[filepath as keyof typeof hardcoded_descriptions];
     }
     if (hardcoded_hide_title.includes(filepath)) {
       contents.data.hide_title = true;
@@ -273,6 +274,15 @@ function markdown_add_slug(
   const slug = get_slug(filepath);
   contents.data.slug = slug;
 }
+
+// function copy_platform_logos(): void {
+//   execSync("mkdir -p " + OUTPUT_DIRECTORY + "/imgs/platform-logos");
+//   execSync(
+//     "cp -r ../datahub-web-react/src/images " +
+//       OUTPUT_DIRECTORY +
+//       "/imgs/platform-logos"
+//   );
+// }
 
 function new_url(original: string, filepath: string): string {
   if (original.toLowerCase().startsWith(HOSTED_SITE_URL)) {
@@ -391,6 +401,37 @@ function markdown_enable_specials(
   const new_content = contents.content
     .replace(/^<!--HOSTED_DOCS_ONLY$/gm, "")
     .replace(/^HOSTED_DOCS_ONLY-->$/gm, "");
+  contents.content = new_content;
+}
+
+function markdown_process_inline_directives(
+  contents: matter.GrayMatterFile<string>,
+  filepath: string
+): void {
+  const new_content = contents.content.replace(
+    /^{{\s+inline\s+(\S+)\s+(show_path_as_comment\s+)?\s*}}$/gm,
+    (_, inline_file_path: string, show_path_as_comment: string) => {
+      if (!inline_file_path.startsWith("/")) {
+        throw new Error(`inline path must be absolute: ${inline_file_path}`);
+      }
+
+      // console.log(`Inlining ${inline_file_path} into ${filepath}`);
+      const referenced_file = fs.readFileSync(
+        path.join("..", inline_file_path),
+        "utf8"
+      );
+
+      // TODO: Add support for start_after_line and end_before_line arguments
+      // that can be used to limit the inlined content to a specific range of lines.
+      let new_contents = "";
+      if (show_path_as_comment) {
+        new_contents += `# Inlined from ${inline_file_path}\n`;
+      }
+      new_contents += referenced_file;
+
+      return new_contents;
+    }
+  );
   contents.content = new_content;
 }
 
@@ -526,6 +567,29 @@ function write_markdown_file(
   }
 }
 
+function copy_python_wheels(): void {
+  // Copy the built wheel files to the static directory.
+  const wheel_dirs = [
+    "../metadata-ingestion/dist",
+    "../metadata-ingestion-modules/airflow-plugin/dist",
+    "../metadata-ingestion-modules/dagster-plugin/dist",
+  ];
+
+  const wheel_output_directory = path.join(STATIC_DIRECTORY, "wheels");
+  fs.mkdirSync(wheel_output_directory, { recursive: true });
+
+  for (const wheel_dir of wheel_dirs) {
+    const wheel_files = fs.readdirSync(wheel_dir);
+    for (const wheel_file of wheel_files) {
+      const src = path.join(wheel_dir, wheel_file);
+      const dest = path.join(wheel_output_directory, wheel_file);
+
+      // console.log(`Copying artifact ${src} to ${dest}...`);
+      fs.copyFileSync(src, dest);
+    }
+  }
+}
+
 (async function main() {
   for (const filepath of markdown_files) {
     //console.log("Processing:", filepath);
@@ -537,6 +601,8 @@ function write_markdown_file(
     markdown_add_edit_url(contents, filepath);
     markdown_rewrite_urls(contents, filepath);
     markdown_enable_specials(contents, filepath);
+    markdown_process_inline_directives(contents, filepath);
+    //copy_platform_logos();
     // console.log(contents);
 
     const out_path = `${OUTPUT_DIRECTORY}/${filepath}`;
@@ -559,6 +625,7 @@ function write_markdown_file(
     "docs/actions/sources",
     "docs/actions/guides",
     "metadata-ingestion/archived",
+    "metadata-ingestion/sink_docs",
     "docs/what",
     "docs/wip",
   ];
@@ -576,4 +643,8 @@ function write_markdown_file(
       );
     }
   }
+
+  // Generate static directory.
+  copy_python_wheels();
+  // TODO: copy over the source json schemas + other artifacts.
 })();

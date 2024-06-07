@@ -51,7 +51,7 @@ def pretty_id(id: Optional[str]) -> str:
     if id.startswith("urn:li:dataset"):
         dataset_key = dataset_urn_to_key(id)
         if dataset_key:
-            return f"{colored('dataset','cyan')}:{colored(dataset_key.platform,'white')}:{colored(dataset_key.name,'white')}"
+            return f"{colored('dataset','cyan')}:{colored(dataset_key.platform[len('urn:li:dataPlatform:'):],'white')}:{colored(dataset_key.name,'white')}"
     # failed to prettify, return original
     return id
 
@@ -79,7 +79,7 @@ def get_timeline(
     diff_param: str = f"&raw={diff}" if diff else ""
     endpoint: str = (
         host
-        + f"/openapi/timeline/v1/{encoded_urn}?categories={categories}{start_time_param}{end_time_param}{diff_param}"
+        + f"/openapi/v2/timeline/v1/{encoded_urn}?categories={categories}{start_time_param}{end_time_param}{diff_param}"
     )
     click.echo(endpoint)
 

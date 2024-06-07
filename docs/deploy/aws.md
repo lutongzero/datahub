@@ -15,7 +15,7 @@ This guide requires the following tools:
 - [kubectl](https://kubernetes.io/docs/tasks/tools/) to manage kubernetes resources
 - [helm](https://helm.sh/docs/intro/install/) to deploy the resources based on helm charts. Note, we only support Helm
     3.
-- [eksctl](https://eksctl.io/introduction/#installation) to create and manage clusters on EKS
+- [eksctl](https://eksctl.io/installation/) to create and manage clusters on EKS
 - [AWS CLI](https://docs.aws.amazon.com/cli/latest/userguide/cli-chap-install.html) to manage AWS resources
 
 To use the above tools, you need to set up AWS credentials by following
@@ -52,6 +52,8 @@ ip-192-168-49-49.us-west-2.compute.internal   Ready    <none>   3h    v1.18.9-ek
 ip-192-168-64-56.us-west-2.compute.internal   Ready    <none>   3h    v1.18.9-eks-d1db3c
 ip-192-168-8-126.us-west-2.compute.internal   Ready    <none>   3h    v1.18.9-eks-d1db3c
 ```
+
+Once your cluster is running, make sure to install the EBS CSI driver, Core DNS, and VPC CNI plugin for Kubernetes. [add-ons](https://docs.aws.amazon.com/eks/latest/userguide/eks-add-ons.html)
 
 ## Setup DataHub using Helm
 
@@ -100,7 +102,7 @@ eksctl create iamserviceaccount \
 Install the TargetGroupBinding custom resource definition by running the following.
 
 ```
-kubectl apply -k "github.com/aws/eks-charts/stable/aws-load-balancer-controller//crds?ref=master"
+kubectl apply -k "github.com/aws/eks-charts/stable/aws-load-balancer-controller/crds?ref=master"
 ```
 
 Add the helm chart repository containing the latest version of the ALB controller.
@@ -135,7 +137,7 @@ file used to deploy datahub). Change datahub-frontend values to the following.
 datahub-frontend:
   enabled: true
   image:
-    repository: linkedin/datahub-frontend-react
+    repository: acryldata/datahub-frontend-react
     tag: "latest"
   ingress:
     enabled: true
@@ -201,7 +203,11 @@ Provision a MySQL database in AWS RDS that shares the VPC with the kubernetes cl
 the VPC of the kubernetes cluster. Once the database is provisioned, you should be able to see the following page. Take
 a note of the endpoint marked by the red box.
 
-![AWS RDS](../imgs/aws/aws-rds.png)
+
+<p align="center">
+  <img width="70%"  src="https://raw.githubusercontent.com/datahub-project/static-assets/main/imgs/aws/aws-rds.png"/>
+</p>
+
 
 First, add the DB password to kubernetes by running the following.
 
@@ -230,11 +236,15 @@ Run `helm upgrade --install datahub datahub/datahub --values values.yaml` to app
 
 ### Elasticsearch Service
 
-Provision an elasticsearch domain running elasticsearch version 7.9 or above that shares the VPC with the kubernetes
+Provision an elasticsearch domain running elasticsearch version 7.10 or above that shares the VPC with the kubernetes
 cluster or has VPC peering set up between the VPC of the kubernetes cluster. Once the domain is provisioned, you should
 be able to see the following page. Take a note of the endpoint marked by the red box.
 
-![AWS Elasticsearch Service](../imgs/aws/aws-elasticsearch.png)
+
+<p align="center">
+  <img width="70%"  src="https://raw.githubusercontent.com/datahub-project/static-assets/main/imgs/aws/aws-elasticsearch.png"/>
+</p>
+
 
 Update the elasticsearch settings under global in the values.yaml as follows.
 
@@ -295,7 +305,7 @@ a different way of creating time based indices.
   elasticsearchSetupJob:
     enabled: true
     image:
-      repository: linkedin/datahub-elasticsearch-setup
+      repository: acryldata/datahub-elasticsearch-setup
       tag: "***"
     extraEnvs:
       - name: USE_AWS_ELASTICSEARCH
@@ -322,7 +332,7 @@ and [here](../../metadata-service/factories/src/main/java/com/linkedin/gms/facto
 .
 
 A mapping between the property name used in the above two files and the name used in docker/env file can be
-found [here](../../metadata-service/factories/src/main/resources/application.yml).
+found [here](../../metadata-service/configuration/src/main/resources/application.yaml).
 
 ### Managed Streaming for Apache Kafka (MSK)
 
@@ -330,7 +340,11 @@ Provision an MSK cluster that shares the VPC with the kubernetes cluster or has 
 the kubernetes cluster. Once the domain is provisioned, click on the “View client information” button in the ‘Cluster
 Summary” section. You should see a page like below. Take a note of the endpoints marked by the red boxes.
 
-![AWS MSK](../imgs/aws/aws-msk.png)
+
+<p align="center">
+  <img width="70%"  src="https://raw.githubusercontent.com/datahub-project/static-assets/main/imgs/aws/aws-msk.png"/>
+</p>
+
 
 Update the kafka settings under global in the values.yaml as follows.
 

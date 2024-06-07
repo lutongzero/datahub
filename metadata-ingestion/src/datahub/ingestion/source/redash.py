@@ -39,6 +39,7 @@ from datahub.metadata.schema_classes import (
     ChartTypeClass,
     DashboardInfoClass,
 )
+from datahub.utilities.lossy_collections import LossyDict, LossyList
 from datahub.utilities.perf_timer import PerfTimer
 from datahub.utilities.sql_parser import SQLParser
 
@@ -282,7 +283,7 @@ class RedashConfig(ConfigModel):
 @dataclass
 class RedashSourceReport(SourceReport):
     items_scanned: int = 0
-    filtered: List[str] = field(default_factory=list)
+    filtered: LossyList[str] = field(default_factory=LossyList)
     queries_problem_parsing: Set[str] = field(default_factory=set)
     queries_no_dataset: Set[str] = field(default_factory=set)
     charts_no_input: Set[str] = field(default_factory=set)
@@ -295,7 +296,7 @@ class RedashSourceReport(SourceReport):
     )
     max_page_dashboards: Optional[int] = field(default=None)
     api_page_limit: Optional[float] = field(default=None)
-    timing: Dict[str, int] = field(default_factory=dict)
+    timing: LossyDict[str, int] = field(default_factory=LossyDict)
 
     def report_item_scanned(self) -> None:
         self.items_scanned += 1
@@ -358,12 +359,12 @@ class RedashSource(Source):
         )
 
     def error(self, log: logging.Logger, key: str, reason: str) -> None:
-        self.report.report_failure(key, reason)
-        log.error(f"{key} => {reason}")
+        # TODO: Remove this method.
+        self.report.failure(key, reason)
 
     def warn(self, log: logging.Logger, key: str, reason: str) -> None:
-        self.report.report_warning(key, reason)
-        log.warning(f"{key} => {reason}")
+        # TODO: Remove this method.
+        self.report.warning(key, reason)
 
     def validate_connection(self) -> None:
         test_response = self.client._get(f"{self.config.connect_uri}/api")
@@ -586,11 +587,10 @@ class RedashSource(Source):
     def _process_dashboard_response(
         self, current_page: int
     ) -> Iterable[MetadataWorkUnit]:
-        result: List[MetadataWorkUnit] = []
         logger.info(f"Starting processing dashboard for page {current_page}")
         if current_page > self.api_page_limit:
             logger.info(f"{current_page} > {self.api_page_limit} so returning")
-            return result
+            return
         with PerfTimer() as timer:
             dashboards_response = self.client.dashboards(
                 page=current_page, page_size=self.config.page_size
@@ -627,15 +627,11 @@ class RedashSource(Source):
                     dashboard_data, redash_version
                 )
                 mce = MetadataChangeEvent(proposedSnapshot=dashboard_snapshot)
-                wu = MetadataWorkUnit(id=dashboard_snapshot.urn, mce=mce)
-                self.report.report_workunit(wu)
-
-                result.append(wu)
+                yield MetadataWorkUnit(id=dashboard_snapshot.urn, mce=mce)
 
             self.report.timing[f"dashboard-{current_page}"] = int(
                 timer.elapsed_seconds()
             )
-            return result
 
     def _emit_dashboard_mces(self) -> Iterable[MetadataWorkUnit]:
         # Get total number of dashboards to calculate maximum page number
@@ -735,10 +731,9 @@ class RedashSource(Source):
 
     def _process_query_response(self, current_page: int) -> Iterable[MetadataWorkUnit]:
         logger.info(f"Starting processing query for page {current_page}")
-        result: List[MetadataWorkUnit] = []
         if current_page > self.api_page_limit:
             logger.info(f"{current_page} > {self.api_page_limit} so returning")
-            return result
+            return
         with PerfTimer() as timer:
             queries_response = self.client.queries(
                 page=current_page, page_size=self.config.page_size
@@ -759,13 +754,10 @@ class RedashSource(Source):
                 for visualization in query_data.get("visualizations", []):
                     chart_snapshot = self._get_chart_snapshot(query_data, visualization)
                     mce = MetadataChangeEvent(proposedSnapshot=chart_snapshot)
-                    wu = MetadataWorkUnit(id=chart_snapshot.urn, mce=mce)
-                    self.report.report_workunit(wu)
+                    yield MetadataWorkUnit(id=chart_snapshot.urn, mce=mce)
 
-                    result.append(wu)
             self.report.timing[f"query-{current_page}"] = int(timer.elapsed_seconds())
             logger.info(f"Ending processing query for {current_page}")
-            return result
 
     def _emit_chart_mces(self) -> Iterable[MetadataWorkUnit]:
         # Get total number of queries to calculate maximum page number
@@ -784,7 +776,7 @@ class RedashSource(Source):
     def add_config_to_report(self) -> None:
         self.report.api_page_limit = self.config.api_page_limit
 
-    def get_workunits(self) -> Iterable[MetadataWorkUnit]:
+    def get_workunits_internal(self) -> Iterable[MetadataWorkUnit]:
         self.validate_connection()
         self.add_config_to_report()
         with PerfTimer() as timer:

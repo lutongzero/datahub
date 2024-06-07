@@ -1,12 +1,26 @@
 import logging
 import pathlib
+import re
 
 import click
-import regex
+import pytest
 from click.testing import CliRunner
 
 from datahub.entrypoints import datahub
-from datahub.utilities.logging_manager import get_log_buffer
+from datahub.utilities.logging_manager import DATAHUB_PACKAGES, get_log_buffer
+
+pytestmark = pytest.mark.skip(reason="Reconfiguring logging messes up pytest")
+
+
+@pytest.fixture(autouse=True, scope="module")
+def cleanup(monkeypatch):
+    monkeypatch.setenv("DATAHUB_SUPPRESS_LOGGING_MANAGER", "0")
+
+    """Attempt to clear undo the stateful changes done by invoking `my_logging_fn`, which calls `configure_logging`."""
+    yield
+    for lib in DATAHUB_PACKAGES:
+        lib_logger = logging.getLogger(lib)
+        lib_logger.propagate = True
 
 
 @datahub.command()
@@ -37,7 +51,7 @@ def test_cli_logging(tmp_path):
     assert result.exit_code == 0
 
     # The output should include the stdout and stderr, formatted as expected.
-    regex.match(
+    re.match(
         r"""\
 this is a print statement
 this is a click.echo statement
@@ -62,3 +76,10 @@ ZeroDivisionError: division by zero
     # The first two lines are stdout, so we skip them.
     expected_log_output = "\n".join(result.output.splitlines()[2:])
     assert get_log_buffer().format_lines() == expected_log_output
+
+
+def test_extra_args_exception_suppressed():
+    logger = logging.getLogger("datahub.my_cli_module")
+
+    # This should not throw an exception.
+    logger.info("This is a message with extra args", "foo")

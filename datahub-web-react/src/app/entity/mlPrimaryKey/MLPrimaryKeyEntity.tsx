@@ -5,15 +5,18 @@ import { Preview } from './preview/Preview';
 import { Entity, EntityCapabilityType, IconStyleType, PreviewType } from '../Entity';
 import { getDataForEntityType } from '../shared/containers/profile/utils';
 import { GenericEntityProperties } from '../shared/types';
-import { GetMlPrimaryKeyQuery, useGetMlPrimaryKeyQuery } from '../../../graphql/mlPrimaryKey.generated';
+import { useGetMlPrimaryKeyQuery } from '../../../graphql/mlPrimaryKey.generated';
 import { EntityProfile } from '../shared/containers/profile/EntityProfile';
 import { FeatureTableTab } from '../shared/tabs/ML/MlPrimaryKeyFeatureTableTab';
 import { DocumentationTab } from '../shared/tabs/Documentation/DocumentationTab';
 import { SidebarTagsSection } from '../shared/containers/profile/sidebar/SidebarTagsSection';
 import { SidebarAboutSection } from '../shared/containers/profile/sidebar/AboutSection/SidebarAboutSection';
 import { SidebarDomainSection } from '../shared/containers/profile/sidebar/Domain/SidebarDomainSection';
-import { SidebarOwnerSection } from '../shared/containers/profile/sidebar/Ownership/SidebarOwnerSection';
+import { SidebarOwnerSection } from '../shared/containers/profile/sidebar/Ownership/sidebar/SidebarOwnerSection';
 import { LineageTab } from '../shared/tabs/Lineage/LineageTab';
+import DataProductSection from '../shared/containers/profile/sidebar/DataProduct/DataProductSection';
+import { getDataProduct } from '../shared/utils';
+import { PropertiesTab } from '../shared/tabs/Properties/PropertiesTab';
 
 /**
  * Definition of the DataHub MLPrimaryKey entity.
@@ -61,6 +64,8 @@ export class MLPrimaryKeyEntity implements Entity<MlPrimaryKey> {
         };
     };
 
+    useEntityQuery = useGetMlPrimaryKeyQuery;
+
     renderProfile = (urn: string) => (
         <EntityProfile
             urn={urn}
@@ -80,42 +85,43 @@ export class MLPrimaryKeyEntity implements Entity<MlPrimaryKey> {
                 {
                     name: 'Lineage',
                     component: LineageTab,
-                    display: {
-                        visible: (_, _1) => true,
-                        enabled: (_, result: GetMlPrimaryKeyQuery) => {
-                            return (
-                                (result?.mlPrimaryKey?.upstream?.total || 0) > 0 ||
-                                (result?.mlPrimaryKey?.downstream?.total || 0) > 0
-                            );
-                        },
-                    },
+                },
+                {
+                    name: 'Properties',
+                    component: PropertiesTab,
                 },
             ]}
-            sidebarSections={[
-                {
-                    component: SidebarAboutSection,
-                },
-                {
-                    component: SidebarTagsSection,
-                    properties: {
-                        hasTags: true,
-                        hasTerms: true,
-                    },
-                },
-                {
-                    component: SidebarOwnerSection,
-                    properties: {
-                        defaultOwnerType: OwnershipType.TechnicalOwner,
-                    },
-                },
-                {
-                    component: SidebarDomainSection,
-                },
-            ]}
+            sidebarSections={this.getSidebarSections()}
         />
     );
 
+    getSidebarSections = () => [
+        {
+            component: SidebarAboutSection,
+        },
+        {
+            component: SidebarOwnerSection,
+            properties: {
+                defaultOwnerType: OwnershipType.TechnicalOwner,
+            },
+        },
+        {
+            component: SidebarTagsSection,
+            properties: {
+                hasTags: true,
+                hasTerms: true,
+            },
+        },
+        {
+            component: SidebarDomainSection,
+        },
+        {
+            component: DataProductSection,
+        },
+    ];
+
     renderPreview = (_: PreviewType, data: MlPrimaryKey) => {
+        const genericProperties = this.getGenericEntityProperties(data);
         // eslint-disable-next-line
         const platform = data?.['featureTables']?.relationships?.[0]?.entity?.platform;
         return (
@@ -126,12 +132,14 @@ export class MLPrimaryKeyEntity implements Entity<MlPrimaryKey> {
                 description={data.description}
                 owners={data.ownership?.owners}
                 platform={platform}
+                dataProduct={getDataProduct(genericProperties?.dataProduct)}
             />
         );
     };
 
     renderSearch = (result: SearchResult) => {
         const data = result.entity as MlPrimaryKey;
+        const genericProperties = this.getGenericEntityProperties(data);
         // eslint-disable-next-line
         const platform = data?.['featureTables']?.relationships?.[0]?.entity?.platform;
         return (
@@ -143,6 +151,9 @@ export class MLPrimaryKeyEntity implements Entity<MlPrimaryKey> {
                 owners={data.ownership?.owners}
                 platform={platform}
                 platformInstanceId={data.dataPlatformInstance?.instanceId}
+                dataProduct={getDataProduct(genericProperties?.dataProduct)}
+                degree={(result as any).degree}
+                paths={(result as any).paths}
             />
         );
     };
@@ -179,6 +190,7 @@ export class MLPrimaryKeyEntity implements Entity<MlPrimaryKey> {
             EntityCapabilityType.DOMAINS,
             EntityCapabilityType.DEPRECATION,
             EntityCapabilityType.SOFT_DELETE,
+            EntityCapabilityType.DATA_PRODUCTS,
         ]);
     };
 }

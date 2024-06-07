@@ -8,7 +8,6 @@ import com.linkedin.datahub.upgrade.nocode.NoCodeUpgrade;
 import com.linkedin.metadata.graph.GraphService;
 import java.util.function.Function;
 
-
 public class ClearGraphServiceStep implements UpgradeStep {
 
   private final String deletePattern = ".*";
@@ -49,7 +48,7 @@ public class ClearGraphServiceStep implements UpgradeStep {
       try {
         _graphService.clear();
       } catch (Exception e) {
-        context.report().addLine(String.format("Failed to clear graph indices: %s", e.toString()));
+        context.report().addLine("Failed to clear graph indices", e);
         return new DefaultUpgradeStepResult(id(), UpgradeStepResult.Result.FAILED);
       }
       return new DefaultUpgradeStepResult(id(), UpgradeStepResult.Result.SUCCEEDED);

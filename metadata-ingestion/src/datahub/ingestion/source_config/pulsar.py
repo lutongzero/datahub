@@ -4,8 +4,11 @@ from urllib.parse import urlparse
 
 from pydantic import Field, validator
 
-from datahub.configuration.common import AllowDenyPattern, ConfigurationError
-from datahub.configuration.source_common import DEFAULT_ENV, DatasetSourceConfigBase
+from datahub.configuration.common import AllowDenyPattern
+from datahub.configuration.source_common import (
+    EnvConfigMixin,
+    PlatformInstanceConfigMixin,
+)
 from datahub.ingestion.source.state.stale_entity_removal_handler import (
     StatefulStaleMetadataRemovalConfig,
 )
@@ -29,9 +32,9 @@ def _is_valid_hostname(hostname: str) -> bool:
     return all(allowed.match(x) for x in hostname.split("."))
 
 
-class PulsarSourceConfig(StatefulIngestionConfigBase, DatasetSourceConfigBase):
-    env: str = DEFAULT_ENV
-
+class PulsarSourceConfig(
+    StatefulIngestionConfigBase, PlatformInstanceConfigMixin, EnvConfigMixin
+):
     web_service_url: str = Field(
         default="http://localhost:8080", description="The web URL for the cluster."
     )
@@ -99,7 +102,7 @@ class PulsarSourceConfig(StatefulIngestionConfigBase, DatasetSourceConfigBase):
         cls, token: Optional[str], values: Dict[str, Optional[str]]
     ) -> Optional[str]:
         if token is not None and values.get("issuer_url") is not None:
-            raise ConfigurationError(
+            raise ValueError(
                 "Expected only one authentication method, either issuer_url or token."
             )
         return token
@@ -111,7 +114,7 @@ class PulsarSourceConfig(StatefulIngestionConfigBase, DatasetSourceConfigBase):
         if values.get("issuer_url") is not None and (
             client_secret is None or values.get("client_id") is None
         ):
-            raise ConfigurationError(
+            raise ValueError(
                 "Missing configuration: client_id and client_secret are mandatory when issuer_url is set."
             )
         return client_secret
@@ -122,12 +125,10 @@ class PulsarSourceConfig(StatefulIngestionConfigBase, DatasetSourceConfigBase):
         url = urlparse(val)
 
         if url.scheme not in ["http", "https"]:
-            raise ConfigurationError(
-                f"Scheme should be http or https, found {url.scheme}"
-            )
+            raise ValueError(f"Scheme should be http or https, found {url.scheme}")
 
         if not _is_valid_hostname(url.hostname.__str__()):
-            raise ConfigurationError(
+            raise ValueError(
                 f"Not a valid hostname, hostname contains invalid characters, found {url.hostname}"
             )
 

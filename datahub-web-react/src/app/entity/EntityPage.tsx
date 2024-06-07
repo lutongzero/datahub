@@ -7,12 +7,11 @@ import useIsLineageMode from '../lineage/utils/useIsLineageMode';
 import { useEntityRegistry } from '../useEntityRegistry';
 import analytics, { EventType } from '../analytics';
 import { decodeUrn } from './shared/utils';
-import { useGetAuthenticatedUserUrn } from '../useGetAuthenticatedUser';
 import { useGetGrantedPrivilegesQuery } from '../../graphql/policy.generated';
-import { Message } from '../shared/Message';
 import { UnauthorizedPage } from '../authorization/UnauthorizedPage';
 import { ErrorSection } from '../shared/error/ErrorSection';
 import { VIEW_ENTITY_PAGE } from './shared/constants';
+import { useUserContext } from '../context/useUserContext';
 
 interface RouteParams {
     urn: string;
@@ -33,14 +32,15 @@ export const EntityPage = ({ entityType }: Props) => {
     const isBrowsable = entity.isBrowseEnabled();
     const isLineageSupported = entity.isLineageEnabled();
     const isLineageMode = useIsLineageMode();
-    const authenticatedUserUrn = useGetAuthenticatedUserUrn();
-    const { loading, error, data } = useGetGrantedPrivilegesQuery({
+    const authenticatedUserUrn = useUserContext()?.user?.urn;
+    const { error, data } = useGetGrantedPrivilegesQuery({
         variables: {
             input: {
-                actorUrn: authenticatedUserUrn,
+                actorUrn: authenticatedUserUrn as string,
                 resourceSpec: { resourceType: entityType, resourceUrn: urn },
             },
         },
+        skip: !authenticatedUserUrn,
         fetchPolicy: 'cache-first',
     });
     const privileges = data?.getGrantedPrivileges?.privileges || [];
@@ -70,7 +70,6 @@ export const EntityPage = ({ entityType }: Props) => {
 
     return (
         <>
-            {loading && <Message type="loading" content="Loading..." style={{ marginTop: '10%' }} />}
             {error && <ErrorSection />}
             {data && !canViewEntityPage && <UnauthorizedPage />}
             {canViewEntityPage &&

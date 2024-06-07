@@ -49,6 +49,7 @@ query getChart($urn: String!) {
         domain {
             ...entityDomain
         }
+        ...entityDataProduct
         deprecation {
             ...deprecationFields
         }
@@ -64,17 +65,14 @@ query getChart($urn: String!) {
         parentContainers {
             ...parentContainersFields
         }
-        upstream: lineage(input: { direction: UPSTREAM, start: 0, count: 100 }) {
-            ...partialLineageResults
-        }
-        downstream: lineage(input: { direction: DOWNSTREAM, start: 0, count: 100 }) {
-            ...partialLineageResults
-        }
         status {
             removed
         }
         dataPlatformInstance {
             ...dataPlatformInstanceFields
+        }
+        browsePathV2 {
+            ...browsePathV2Fields
         }
         statsSummary {
             viewCount
@@ -99,8 +97,27 @@ query getChart($urn: String!) {
             ...inputFieldsFields
         }
         privileges {
-            canEditLineage
-            canEditEmbed
+            ...entityPrivileges
+        }
+        subTypes {
+            typeNames
+        }
+        autoRenderAspects: aspects(input: { autoRenderOnly: true }) {
+            ...autoRenderAspectFields
+        }
+        structuredProperties {
+            properties {
+                ...structuredPropertiesFields
+            }
+        }
+        health {
+            ...entityHealth
+        }
+        activeIncidents: incidents(start: 0, count: 1, state: ACTIVE) {
+            total
+        }
+        forms {
+            ...formsFields
         }
     }
 }

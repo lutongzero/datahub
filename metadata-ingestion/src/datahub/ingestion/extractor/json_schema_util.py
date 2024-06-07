@@ -1,6 +1,6 @@
 import json
 import logging
-import unittest
+import unittest.mock
 from hashlib import md5
 from typing import Any, Callable, Dict, Iterable, List, Optional, Type
 
@@ -114,6 +114,16 @@ class FieldPath:
         else:
             return None
 
+    def _get_native_type_override(self) -> Optional[str]:
+        type_override = self._get_type_override()
+        if type_override:
+            # return type specific native types for collection types
+            if isinstance(type_override.type, ArrayTypeClass):
+                return f"array({','.join(type_override.type.nestedType or [])})"
+            elif isinstance(type_override.type, MapTypeClass):
+                return f"map(str,{type_override.type.valueType})"
+        return None
+
     def get_recursive(self, schema: Dict) -> Optional[str]:
         """Return a recursive type if found"""
         schema_str = str(schema)
@@ -174,6 +184,8 @@ class FieldPath:
 
 
 class JsonSchemaTranslator:
+    _INJECT_DEFAULTS_INTO_DESCRIPTION = True
+
     field_type_mapping: Dict[str, Type] = {
         "null": NullTypeClass,
         "bool": BooleanTypeClass,
@@ -194,6 +206,12 @@ class JsonSchemaTranslator:
         "fixed": FixedTypeClass,
     }
 
+    @staticmethod
+    def _is_nullable(schema: Dict) -> bool:
+        if "type" in schema and isinstance(schema["type"], list):
+            return "null" in schema["type"]
+        return False
+
     @classmethod
     def _field_from_primitive(
         cls,
@@ -204,7 +222,18 @@ class JsonSchemaTranslator:
         specific_type: Optional[str] = None,
     ) -> Iterable[SchemaField]:
         type_override = field_path._get_type_override()
-        if datahub_field_type in [BooleanTypeClass, NumberTypeClass, StringTypeClass]:
+        native_type = field_path._get_native_type_override() or str(
+            schema.get("type") or ""
+        )
+        nullable = JsonSchemaTranslator._is_nullable(schema)
+        if "format" in schema:
+            native_type = f"{native_type}({schema['format']})"
+        if datahub_field_type in [
+            BooleanTypeClass,
+            NumberTypeClass,
+            StringTypeClass,
+            NullTypeClass,
+        ]:
             discriminated_type = (
                 specific_type
                 or JsonSchemaTranslator._get_discriminated_type_from_schema(schema)
@@ -217,18 +246,25 @@ class JsonSchemaTranslator:
                 description=JsonSchemaTranslator._get_description_from_any_schema(
                     schema
                 ),
-                nativeDataType=schema.get("type") or "",
-                nullable=not required,
-                jsonProps=JsonSchemaTranslator._get_jsonprops_for_any_schema(schema),
+                nativeDataType=native_type,
+                nullable=nullable,
+                jsonProps=JsonSchemaTranslator._get_jsonprops_for_any_schema(
+                    schema, required=required
+                ),
                 isPartOfKey=field_path.is_key_schema,
             )
         elif datahub_field_type in [EnumTypeClass]:
+            # Convert enums to string representation
+            schema_enums = list(map(json.dumps, schema["enum"]))
             yield SchemaField(
                 fieldPath=field_path.expand_type("enum", schema).as_string(),
                 type=type_override or SchemaFieldDataTypeClass(type=EnumTypeClass()),
                 nativeDataType="Enum",
-                description=f"one of {','.join(schema['enum'])}",
-                nullable=not required,
+                description=f"One of: {', '.join(schema_enums)}",
+                nullable=nullable,
+                jsonProps=JsonSchemaTranslator._get_jsonprops_for_any_schema(
+                    schema, required=required
+                ),
                 isPartOfKey=field_path.is_key_schema,
             )
         else:
@@ -246,7 +282,17 @@ class JsonSchemaTranslator:
         elif "enum" in schema:
             return "enum"
         elif "type" in schema:
-            if schema["type"] != "object":
+            if isinstance(schema["type"], list):
+                # we have an array of types
+                # if only one type, short-circuit
+                if len(schema["type"]) == 1:
+                    return schema["type"][0]
+                # if this is a union with null, short-circuit
+                elif len(schema["type"]) == 2 and "null" in schema["type"]:
+                    return [t for t in schema["type"] if t != "null"][0]
+                else:
+                    return "union"
+            elif schema["type"] != "object":
                 return schema["type"]
             elif "additionalProperties" in schema and isinstance(
                 schema["additionalProperties"], dict
@@ -261,28 +307,36 @@ class JsonSchemaTranslator:
         generic_type = JsonSchemaTranslator._get_type_from_schema(schema)
         if generic_type == "object" and "javaType" in schema:
             return schema["javaType"].split(".")[-1]
-        if generic_type == "object" and "title" in schema:
+        if generic_type == "object" and "title" in schema and "properties" in schema:
             return schema["title"]
+        if "format" in schema:
+            return f"{generic_type}({schema['format']})"
 
         return generic_type
 
     @staticmethod
     def _get_description_from_any_schema(schema: Dict) -> str:
-        # we do a redundant `if description in schema` check to guard against the scenario that schema is not a dictionary
-        description = (
-            (schema.get("description") or "") if "description" in schema else ""
-        )
-        default = schema.get("default")
-        if default is not None:
-            description = f"{description}\nField default value: {default}"
+        description = ""
+        if "description" in schema:
+            description = str(schema.get("description"))
+        elif "const" in schema:
+            schema_const = schema.get("const")
+            description = f"Const value: {schema_const}"
+        if JsonSchemaTranslator._INJECT_DEFAULTS_INTO_DESCRIPTION:
+            default = schema.get("default")
+            if default is not None:
+                description = f"{description}\nField default value: {default}"
         return description
 
     @staticmethod
-    def _get_jsonprops_for_any_schema(schema: Dict) -> Optional[str]:
+    def _get_jsonprops_for_any_schema(
+        schema: Dict, required: Optional[bool] = None
+    ) -> Optional[str]:
         json_props = {}
-        defaults = schema.get("default")
-        if defaults:
-            json_props["default"] = defaults
+        if "default" in schema:
+            json_props["default"] = schema["default"]
+        if required is not None:
+            json_props["required"] = required
 
         return json.dumps(json_props) if json_props else None
 
@@ -295,12 +349,13 @@ class JsonSchemaTranslator:
         required: bool = False,
         specific_type: Optional[str] = None,
     ) -> Iterable[SchemaField]:
-
         discriminated_type = (
             specific_type
             or JsonSchemaTranslator._get_discriminated_type_from_schema(schema)
         )
         type_override = field_path._get_type_override()
+        native_type_override = field_path._get_native_type_override()
+        nullable = JsonSchemaTranslator._is_nullable(schema)
 
         if Ellipsis in schema:
             # This happens in the case of recursive fields, we short-circuit by making this just be an object
@@ -314,15 +369,15 @@ class JsonSchemaTranslator:
                     fieldPath=field_path.expand_type(
                         recursive_type, schema
                     ).as_string(),
-                    nativeDataType=recursive_type,
+                    nativeDataType=native_type_override or recursive_type,
                     type=type_override
                     or SchemaFieldDataTypeClass(type=RecordTypeClass()),
-                    nullable=not required,
+                    nullable=nullable,
                     description=JsonSchemaTranslator._get_description_from_any_schema(
                         schema
                     ),
                     jsonProps=JsonSchemaTranslator._get_jsonprops_for_any_schema(
-                        schema
+                        schema, required
                     ),
                     isPartOfKey=field_path.is_key_schema,
                     recursive=True,
@@ -334,17 +389,16 @@ class JsonSchemaTranslator:
                     fieldPath=field_path.expand_type(
                         discriminated_type, schema
                     ).as_string(),
-                    nativeDataType=JsonSchemaTranslator._get_discriminated_type_from_schema(
-                        schema
-                    ),
+                    nativeDataType=native_type_override
+                    or JsonSchemaTranslator._get_discriminated_type_from_schema(schema),
                     type=type_override
                     or SchemaFieldDataTypeClass(type=RecordTypeClass()),
-                    nullable=not required,
+                    nullable=nullable,
                     description=JsonSchemaTranslator._get_description_from_any_schema(
                         schema
                     ),
                     jsonProps=JsonSchemaTranslator._get_jsonprops_for_any_schema(
-                        schema
+                        schema, required
                     ),
                     isPartOfKey=field_path.is_key_schema,
                 )
@@ -363,12 +417,35 @@ class JsonSchemaTranslator:
                     inner_field_path,
                 )
         elif datahub_field_type == ArrayTypeClass:
-            field_path = field_path.expand_type("array", schema)
-            # default items schema is string
+            field_path = field_path.expand_type(discriminated_type, schema)
+            yield SchemaField(
+                fieldPath=field_path.as_string(),
+                type=type_override or SchemaFieldDataTypeClass(type=ArrayTypeClass()),
+                nativeDataType=native_type_override
+                or JsonSchemaTranslator._get_discriminated_type_from_schema(schema),
+                description=JsonSchemaTranslator._get_description_from_any_schema(
+                    schema
+                ),
+                nullable=nullable,
+                jsonProps=JsonSchemaTranslator._get_jsonprops_for_any_schema(
+                    schema, required=required
+                ),
+                isPartOfKey=field_path.is_key_schema,
+            )
+
             items_schema = schema.get("items", {"type": "string"})
             items_type = JsonSchemaTranslator._get_type_from_schema(items_schema)
+            field_name = items_schema.get("title", None)
+            if not field_name:
+                field_name = items_type
+            inner_field_path = field_path.clone_plus(
+                FieldElement(type=[], name=field_name, schema_types=[])
+            )
             yield from JsonSchemaTranslator.get_fields(
-                items_type, items_schema, required=False, base_field_path=field_path
+                items_type,
+                items_schema,
+                required=False,
+                base_field_path=inner_field_path,
             )
 
         elif datahub_field_type == MapTypeClass:
@@ -380,6 +457,7 @@ class JsonSchemaTranslator:
             field_path._set_parent_type_if_not_exists(
                 DataHubType(type=MapTypeClass, nested_type=value_type)
             )
+            # FIXME: description not set. This is present in schema["description"].
             yield from JsonSchemaTranslator.get_fields(
                 JsonSchemaTranslator._get_type_from_schema(
                     schema["additionalProperties"]
@@ -396,20 +474,41 @@ class JsonSchemaTranslator:
                 "anyOf": schema.get("anyOf"),
                 "allOf": schema.get("allOf"),
             }
+            # unions can also exist if the "type" field is of type array
+            if "type" in schema and isinstance(schema["type"], list):
+                union_category_map["anyOf"] = [{"type": t} for t in schema["type"]]
             (union_category, union_category_schema) = [
                 (k, v) for k, v in union_category_map.items() if v
             ][0]
+            if not field_path.has_field_name() and len(union_category_schema) == 1:
+                # Special case: If this is a top-level field AND there is only one type in the
+                # union, we collapse down the union to avoid extra nesting.
+                union_schema = union_category_schema[0]
+                merged_union_schema = (
+                    JsonSchemaTranslator._retain_parent_schema_props_in_union(
+                        union_schema=union_schema, parent_schema=schema
+                    )
+                )
+                yield from JsonSchemaTranslator.get_fields(
+                    JsonSchemaTranslator._get_type_from_schema(merged_union_schema),
+                    merged_union_schema,
+                    required=required,
+                    base_field_path=field_path,
+                )
+                return  # this one is done
             if field_path.has_field_name():
+                # The frontend expects the top-level field to be a record, so we only
+                # include the UnionTypeClass if we're not at the top level.
                 yield SchemaField(
                     fieldPath=field_path.expand_type("union", schema).as_string(),
                     type=type_override or SchemaFieldDataTypeClass(UnionTypeClass()),
                     nativeDataType=f"union({union_category})",
-                    nullable=not required,
+                    nullable=nullable,
                     description=JsonSchemaTranslator._get_description_from_any_schema(
                         schema
                     ),
                     jsonProps=JsonSchemaTranslator._get_jsonprops_for_any_schema(
-                        schema
+                        schema, required
                     ),
                     isPartOfKey=field_path.is_key_schema,
                 )
@@ -425,15 +524,40 @@ class JsonSchemaTranslator:
                 union_field_path._set_parent_type_if_not_exists(
                     DataHubType(type=UnionTypeClass, nested_type=union_type)
                 )
+                merged_union_schema = (
+                    JsonSchemaTranslator._retain_parent_schema_props_in_union(
+                        union_schema=union_schema, parent_schema=schema
+                    )
+                )
                 yield from JsonSchemaTranslator.get_fields(
-                    JsonSchemaTranslator._get_type_from_schema(union_schema),
-                    union_schema,
+                    JsonSchemaTranslator._get_type_from_schema(merged_union_schema),
+                    merged_union_schema,
                     required=required,
                     base_field_path=union_field_path,
                     specific_type=union_type,
                 )
         else:
             raise Exception(f"Unhandled type {datahub_field_type}")
+
+    @staticmethod
+    def _retain_parent_schema_props_in_union(
+        union_schema: Dict, parent_schema: Dict
+    ) -> Dict:
+        """Merge the "properties" and the "required" fields from the parent schema into the child union schema."""
+
+        union_schema = union_schema.copy()
+        if "properties" in parent_schema:
+            union_schema["properties"] = {
+                **parent_schema["properties"],
+                **union_schema.get("properties", {}),
+            }
+        if "required" in parent_schema:
+            union_schema["required"] = [
+                *parent_schema["required"],
+                *union_schema.get("required", []),
+            ]
+
+        return union_schema
 
     @staticmethod
     def get_type_mapping(json_type: str) -> Type:
@@ -453,6 +577,7 @@ class JsonSchemaTranslator:
         BytesTypeClass: _field_from_primitive,
         NumberTypeClass: _field_from_primitive,
         MapTypeClass: _field_from_complex_type,
+        NullTypeClass: _field_from_primitive,
     }
 
     @classmethod
@@ -495,7 +620,8 @@ class JsonSchemaTranslator:
                     jsonref_schema_dict = schema_dict
                 else:
                     # first validate the schema using a json validator
-                    jsonschema.Draft7Validator.check_schema(schema_dict)
+                    validator = jsonschema.validators.validator_for(schema_dict)
+                    validator.check_schema(schema_dict)
                     # then apply jsonref
                     jsonref_schema_dict = jsonref.loads(schema_string)
             except Exception as e:

@@ -55,20 +55,34 @@ class DuckDBLite(DataHubLiteLocal[DuckDBLiteConfig]):
         if not config.read_only:
             self._init_db()
 
-    def _init_db(self):
+    def _create_unique_index(
+        self, index_name: str, table_name: str, columns: list
+    ) -> None:
+        try:
+            self.duckdb_client.execute(
+                f"CREATE UNIQUE INDEX {index_name} ON {table_name} ({', '.join(columns)})"
+            )
+        except duckdb.CatalogException as e:
+            if "already exists" not in str(e).lower():
+                raise
+
+    def _init_db(self) -> None:
         self.duckdb_client.execute(
             "CREATE TABLE IF NOT EXISTS metadata_aspect_v2 "
             "(urn VARCHAR, aspect_name VARCHAR, version BIGINT, metadata JSON, system_metadata JSON, createdon BIGINT)"
         )
-        self.duckdb_client.execute(
-            "CREATE UNIQUE INDEX IF NOT EXISTS aspect_idx ON metadata_aspect_v2 (urn, aspect_name, version)"
+
+        self._create_unique_index(
+            "aspect_idx", "metadata_aspect_v2", ["urn", "aspect_name", "version"]
         )
+
         self.duckdb_client.execute(
             "CREATE TABLE IF NOT EXISTS metadata_edge_v2 "
             "(src_id VARCHAR, relnship VARCHAR, dst_id VARCHAR, dst_label VARCHAR)"
         )
-        self.duckdb_client.execute(
-            "CREATE UNIQUE INDEX IF NOT EXISTS edge_idx ON metadata_edge_v2 (src_id, relnship, dst_id)"
+
+        self._create_unique_index(
+            "edge_idx", "metadata_edge_v2", ["src_id", "relnship", "dst_id"]
         )
 
     def location(self) -> str:
@@ -672,7 +686,6 @@ class DuckDBLite(DataHubLiteLocal[DuckDBLiteConfig]):
     def _create_edges_from_data_platform_instance(
         self, data_platform_instance_urn: Urn
     ) -> None:
-
         data_platform_urn = DataPlatformUrn.create_from_string(
             data_platform_instance_urn.get_entity_id()[0]
         )
@@ -719,7 +732,6 @@ class DuckDBLite(DataHubLiteLocal[DuckDBLiteConfig]):
     def post_update_hook(
         self, entity_urn: str, aspect_name: str, aspect: _Aspect
     ) -> None:
-
         if isinstance(aspect, DatasetPropertiesClass):
             dp: DatasetPropertiesClass = aspect
             if dp.name:

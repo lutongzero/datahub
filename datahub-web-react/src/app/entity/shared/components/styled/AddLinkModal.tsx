@@ -1,10 +1,11 @@
 import React, { useState } from 'react';
 import { message, Modal, Button, Form, Input } from 'antd';
 import { PlusOutlined } from '@ant-design/icons';
-import { useGetAuthenticatedUser } from '../../../../useGetAuthenticatedUser';
 import { useEntityData, useMutationUrn } from '../../EntityContext';
 import { useAddLinkMutation } from '../../../../../graphql/mutations.generated';
 import analytics, { EventType, EntityActionType } from '../../../../analytics';
+import { useUserContext } from '../../../../context/useUserContext';
+import { getModalDomContainer } from '../../../../../utils/focus';
 
 type AddLinkProps = {
     buttonProps?: Record<string, unknown>;
@@ -14,7 +15,7 @@ type AddLinkProps = {
 export const AddLinkModal = ({ buttonProps, refetch }: AddLinkProps) => {
     const [isModalVisible, setIsModalVisible] = useState(false);
     const mutationUrn = useMutationUrn();
-    const user = useGetAuthenticatedUser();
+    const user = useUserContext();
     const { entityType } = useEntityData();
     const [addLinkMutation] = useAddLinkMutation();
 
@@ -30,7 +31,7 @@ export const AddLinkModal = ({ buttonProps, refetch }: AddLinkProps) => {
     };
 
     const handleAdd = async (formData: any) => {
-        if (user?.corpUser.urn) {
+        if (user?.urn) {
             try {
                 await addLinkMutation({
                     variables: { input: { linkUrl: formData.url, label: formData.label, resourceUrn: mutationUrn } },
@@ -57,7 +58,7 @@ export const AddLinkModal = ({ buttonProps, refetch }: AddLinkProps) => {
 
     return (
         <>
-            <Button icon={<PlusOutlined />} onClick={showModal} {...buttonProps}>
+            <Button data-testid="add-link-button" icon={<PlusOutlined />} onClick={showModal} {...buttonProps}>
                 Add Link
             </Button>
             <Modal
@@ -69,13 +70,15 @@ export const AddLinkModal = ({ buttonProps, refetch }: AddLinkProps) => {
                     <Button type="text" onClick={handleClose}>
                         Cancel
                     </Button>,
-                    <Button form="addLinkForm" key="submit" htmlType="submit">
+                    <Button data-testid="add-link-modal-add-button" form="addLinkForm" key="submit" htmlType="submit">
                         Add
                     </Button>,
                 ]}
+                getContainer={getModalDomContainer}
             >
                 <Form form={form} name="addLinkForm" onFinish={handleAdd} layout="vertical">
                     <Form.Item
+                        data-testid="add-link-modal-url"
                         name="url"
                         label="URL"
                         rules={[
@@ -93,6 +96,7 @@ export const AddLinkModal = ({ buttonProps, refetch }: AddLinkProps) => {
                         <Input placeholder="https://" autoFocus />
                     </Form.Item>
                     <Form.Item
+                        data-testid="add-link-modal-label"
                         name="label"
                         label="Label"
                         rules={[

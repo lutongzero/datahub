@@ -1,11 +1,22 @@
 import html
+import json
+import logging
+from dataclasses import dataclass
 from functools import lru_cache
-from typing import Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 from pydantic.fields import Field
+from tableauserverclient import Server
 
 import datahub.emitter.mce_builder as builder
 from datahub.configuration.common import ConfigModel
+from datahub.ingestion.source import tableau_constant as c
+from datahub.metadata.com.linkedin.pegasus2avro.dataset import (
+    DatasetLineageType,
+    FineGrainedLineage,
+    FineGrainedLineageDownstreamType,
+    FineGrainedLineageUpstreamType,
+)
 from datahub.metadata.com.linkedin.pegasus2avro.schema import (
     ArrayTypeClass,
     BooleanTypeClass,
@@ -21,13 +32,21 @@ from datahub.metadata.schema_classes import (
     BytesTypeClass,
     GlobalTagsClass,
     TagAssociationClass,
+    UpstreamClass,
 )
+from datahub.sql_parsing.sqlglot_lineage import ColumnLineageInfo, SqlParsingResult
+
+logger = logging.getLogger(__name__)
 
 
 class TableauLineageOverrides(ConfigModel):
     platform_override_map: Optional[Dict[str, str]] = Field(
         default=None,
         description="A holder for platform -> platform mappings to generate correct dataset urns",
+    )
+    database_override_map: Optional[Dict[str, str]] = Field(
+        default=None,
+        description="A holder for database -> database mappings to generate correct dataset urns",
     )
 
 
@@ -70,7 +89,6 @@ sheet_graphql_query = """
     name
     path
     luid
-    documentViewId
     createdAt
     updatedAt
     tags {
@@ -84,6 +102,7 @@ sheet_graphql_query = """
         id
         name
         projectName
+        luid
         owner {
           username
         }
@@ -161,6 +180,7 @@ dashboard_graphql_query = """
         id
         name
         projectName
+        luid
         owner {
           username
         }
@@ -184,17 +204,16 @@ embedded_datasource_graphql_query = """
     upstreamTables {
         id
         name
-        isEmbedded
         database {
             name
+            id
         }
         schema
         fullName
         connectionType
         description
-        columns {
-            name
-            remoteType
+        columnsConnection {
+            totalCount
         }
     }
     fields {
@@ -244,6 +263,7 @@ embedded_datasource_graphql_query = """
         id
         name
         projectName
+        luid
         owner {
           username
         }
@@ -269,9 +289,9 @@ custom_sql_graphql_query = """
             upstreamTables {
               id
               name
-              isEmbedded
               database {
                 name
+                id
               }
               schema
               fullName
@@ -279,12 +299,14 @@ custom_sql_graphql_query = """
             }
             ... on PublishedDatasource {
               projectName
+              luid
             }
             ... on EmbeddedDatasource {
               workbook {
                 id
                 name
                 projectName
+                luid
               }
             }
           }
@@ -293,18 +315,23 @@ custom_sql_graphql_query = """
       tables {
         id
         name
-        isEmbedded
         database {
           name
+          id
         }
         schema
         fullName
         connectionType
         description
-        columns {
-            name
-            remoteType
+        columnsConnection {
+            totalCount
         }
+      }
+      connectionType
+      database{
+        name
+        id
+        connectionType
       }
 }
 """
@@ -314,6 +341,7 @@ published_datasource_graphql_query = """
     __typename
     id
     name
+    luid
     hasExtracts
     extractLastRefreshTime
     extractLastIncrementalUpdateTime
@@ -321,18 +349,17 @@ published_datasource_graphql_query = """
     upstreamTables {
       id
       name
-      isEmbedded
       database {
         name
+        id
       }
       schema
       fullName
       connectionType
       description
-      columns {
-        name
-        remoteType
-      }
+      columnsConnection {
+            totalCount
+        }
     }
     fields {
         __typename
@@ -379,8 +406,32 @@ published_datasource_graphql_query = """
     description
     uri
     projectName
+    tags {
+        name
+    }
 }
         """
+
+database_tables_graphql_query = """
+{
+    id
+    isEmbedded
+    columns {
+      remoteType
+      name
+    }
+}
+"""
+
+database_servers_graphql_query = """
+{
+    name
+    id
+    connectionType
+    extendedConnectionType
+    hostName
+}
+"""
 
 # https://referencesource.microsoft.com/#system.data/System/Data/OleDb/OLEDB_Enum.cs,364
 FIELD_TYPE_MAPPING = {
@@ -461,15 +512,17 @@ def tableau_field_to_schema_field(field, ingest_tags):
             field.get("description", ""), field.get("formula")
         ),
         nativeDataType=nativeDataType,
-        globalTags=get_tags_from_params(
-            [
-                field.get("role", ""),
-                field.get("__typename", ""),
-                field.get("aggregation", ""),
-            ]
-        )
-        if ingest_tags
-        else None,
+        globalTags=(
+            get_tags_from_params(
+                [
+                    field.get("role", ""),
+                    field.get("__typename", ""),
+                    field.get("aggregation", ""),
+                ]
+            )
+            if ingest_tags
+            else None
+        ),
     )
 
     return schema_field
@@ -502,6 +555,9 @@ def get_platform(connection_type: str) -> str:
         platform = "mssql"
     elif connection_type in ("athena"):
         platform = "athena"
+    elif connection_type.endswith("_jdbc"):
+        # e.g. convert trino_jdbc -> trino
+        platform = connection_type[: -len("_jdbc")]
     else:
         platform = connection_type
     return platform
@@ -512,12 +568,12 @@ def get_fully_qualified_table_name(
     platform: str,
     upstream_db: str,
     schema: str,
-    full_name: str,
+    table_name: str,
 ) -> str:
     if platform == "athena":
         upstream_db = ""
     database_name = f"{upstream_db}." if upstream_db else ""
-    final_name = full_name.replace("[", "").replace("]", "")
+    final_name = table_name.replace("[", "").replace("]", "")
 
     schema_name = f"{schema}." if schema else ""
 
@@ -534,7 +590,7 @@ def get_fully_qualified_table_name(
         .replace("`", "")
     )
 
-    if platform in ("athena", "hive", "mysql"):
+    if platform in ("athena", "hive", "mysql", "clickhouse"):
         # it two tier database system (athena, hive, mysql), just take final 2
         fully_qualified_table_name = ".".join(
             fully_qualified_table_name.split(".")[-2:]
@@ -548,24 +604,138 @@ def get_fully_qualified_table_name(
     return fully_qualified_table_name
 
 
-def get_platform_instance(
-    platform: str, platform_instance_map: Optional[Dict[str, str]]
-) -> Optional[str]:
-    if platform_instance_map is not None and platform in platform_instance_map.keys():
-        return platform_instance_map[platform]
+@dataclass
+class TableauUpstreamReference:
+    database: Optional[str]
+    database_id: Optional[str]
+    schema: Optional[str]
+    table: str
 
-    return None
+    connection_type: str
+
+    @classmethod
+    def create(
+        cls, d: dict, default_schema_map: Optional[Dict[str, str]] = None
+    ) -> "TableauUpstreamReference":
+        # Values directly from `table` object from Tableau
+        database = t_database = d.get(c.DATABASE, {}).get(c.NAME)
+        database_id = d.get(c.DATABASE, {}).get(c.ID)
+        schema = t_schema = d.get(c.SCHEMA)
+        table = t_table = d.get(c.NAME) or ""
+        t_full_name = d.get(c.FULL_NAME)
+        t_connection_type = d[c.CONNECTION_TYPE]  # required to generate urn
+        t_id = d[c.ID]
+
+        parsed_full_name = cls.parse_full_name(t_full_name)
+        if parsed_full_name and len(parsed_full_name) == 3:
+            database, schema, table = parsed_full_name
+        elif parsed_full_name and len(parsed_full_name) == 2:
+            schema, table = parsed_full_name
+        else:
+            logger.debug(
+                f"Upstream urn generation ({t_id}):"
+                f"  Did not parse full name {t_full_name}: unexpected number of values",
+            )
+
+        if not schema and default_schema_map and database in default_schema_map:
+            schema = default_schema_map[database]
+
+        if database != t_database:
+            logger.debug(
+                f"Upstream urn generation ({t_id}):"
+                f" replacing database {t_database} with {database} from full name {t_full_name}"
+            )
+        if schema != t_schema:
+            logger.debug(
+                f"Upstream urn generation ({t_id}):"
+                f" replacing schema {t_schema} with {schema} from full name {t_full_name}"
+            )
+        if table != t_table:
+            logger.debug(
+                f"Upstream urn generation ({t_id}):"
+                f" replacing table {t_table} with {table} from full name {t_full_name}"
+            )
+
+        # TODO: See if we can remove this -- made for redshift
+        if (
+            schema
+            and t_table
+            and t_full_name
+            and t_table == t_full_name
+            and schema in t_table
+        ):
+            logger.debug(
+                f"Omitting schema for upstream table {t_id}, schema included in table name"
+            )
+            schema = ""
+
+        return cls(
+            database=database,
+            database_id=database_id,
+            schema=schema,
+            table=table,
+            connection_type=t_connection_type,
+        )
+
+    @staticmethod
+    def parse_full_name(full_name: Optional[str]) -> Optional[List[str]]:
+        # fullName is observed to be in formats:
+        #  [database].[schema].[table]
+        #  [schema].[table]
+        #  [table]
+        #  table
+        #  schema
+
+        # TODO: Validate the startswith check. Currently required for our integration tests
+        if full_name is None or not full_name.startswith("["):
+            return None
+
+        return full_name.replace("[", "").replace("]", "").split(".")
+
+    def make_dataset_urn(
+        self,
+        env: str,
+        platform_instance_map: Optional[Dict[str, str]],
+        lineage_overrides: Optional[TableauLineageOverrides] = None,
+        database_hostname_to_platform_instance_map: Optional[Dict[str, str]] = None,
+        database_server_hostname_map: Optional[Dict[str, str]] = None,
+    ) -> str:
+        (
+            upstream_db,
+            platform_instance,
+            platform,
+            original_platform,
+        ) = get_overridden_info(
+            connection_type=self.connection_type,
+            upstream_db=self.database,
+            upstream_db_id=self.database_id,
+            lineage_overrides=lineage_overrides,
+            platform_instance_map=platform_instance_map,
+            database_hostname_to_platform_instance_map=database_hostname_to_platform_instance_map,
+            database_server_hostname_map=database_server_hostname_map,
+        )
+
+        table_name = get_fully_qualified_table_name(
+            original_platform,
+            upstream_db or "",
+            self.schema,
+            self.table,
+        )
+
+        return builder.make_dataset_urn_with_platform_instance(
+            platform, table_name, platform_instance, env
+        )
 
 
-def make_table_urn(
-    env: str,
+def get_overridden_info(
+    connection_type: Optional[str],
     upstream_db: Optional[str],
-    connection_type: str,
-    schema: str,
-    full_name: str,
+    upstream_db_id: Optional[str],
     platform_instance_map: Optional[Dict[str, str]],
     lineage_overrides: Optional[TableauLineageOverrides] = None,
-) -> str:
+    database_hostname_to_platform_instance_map: Optional[Dict[str, str]] = None,
+    database_server_hostname_map: Optional[Dict[str, str]] = None,
+) -> Tuple[Optional[str], Optional[str], str, str]:
     original_platform = platform = get_platform(connection_type)
     if (
         lineage_overrides is not None
@@ -574,13 +744,33 @@ def make_table_urn(
     ):
         platform = lineage_overrides.platform_override_map[original_platform]
 
-    table_name = get_fully_qualified_table_name(
-        original_platform, upstream_db, schema, full_name
+    if (
+        lineage_overrides is not None
+        and lineage_overrides.database_override_map is not None
+        and upstream_db is not None
+        and upstream_db in lineage_overrides.database_override_map.keys()
+    ):
+        upstream_db = lineage_overrides.database_override_map[upstream_db]
+
+    platform_instance = (
+        platform_instance_map.get(original_platform) if platform_instance_map else None
     )
-    platform_instance = get_platform_instance(original_platform, platform_instance_map)
-    return builder.make_dataset_urn_with_platform_instance(
-        platform, table_name, platform_instance, env
-    )
+    if (
+        database_server_hostname_map is not None
+        and upstream_db_id is not None
+        and upstream_db_id in database_server_hostname_map
+    ):
+        hostname = database_server_hostname_map.get(upstream_db_id)
+        if (
+            database_hostname_to_platform_instance_map is not None
+            and hostname in database_hostname_to_platform_instance_map
+        ):
+            platform_instance = database_hostname_to_platform_instance_map.get(hostname)
+
+    if original_platform in ("athena", "hive", "mysql"):  # Two tier databases
+        upstream_db = None
+
+    return upstream_db, platform_instance, platform, original_platform
 
 
 def make_description_from_params(description, formula):
@@ -595,15 +785,90 @@ def make_description_from_params(description, formula):
     return final_description
 
 
+def make_upstream_class(
+    parsed_result: Optional[SqlParsingResult],
+) -> List[UpstreamClass]:
+    upstream_tables: List[UpstreamClass] = []
+
+    if parsed_result is None:
+        return upstream_tables
+
+    for dataset_urn in parsed_result.in_tables:
+        upstream_tables.append(
+            UpstreamClass(type=DatasetLineageType.TRANSFORMED, dataset=dataset_urn)
+        )
+    return upstream_tables
+
+
+def make_fine_grained_lineage_class(
+    parsed_result: Optional[SqlParsingResult],
+    dataset_urn: str,
+    out_columns: List[Dict[Any, Any]],
+) -> List[FineGrainedLineage]:
+    # 1) fine grained lineage links are case sensitive
+    # 2) parsed out columns are always lower cased
+    # 3) corresponding Custom SQL output columns can be in any case lower/upper/mix
+    #
+    # we need a map between 2 and 3 that will be used during building column level linage links (see below)
+    out_columns_map = {
+        col.get(c.NAME, "").lower(): col.get(c.NAME, "") for col in out_columns
+    }
+
+    fine_grained_lineages: List[FineGrainedLineage] = []
+
+    if parsed_result is None:
+        return fine_grained_lineages
+
+    cll: List[ColumnLineageInfo] = (
+        parsed_result.column_lineage if parsed_result.column_lineage is not None else []
+    )
+
+    for cll_info in cll:
+        downstream = (
+            [
+                builder.make_schema_field_urn(
+                    dataset_urn,
+                    out_columns_map.get(
+                        cll_info.downstream.column.lower(),
+                        cll_info.downstream.column,
+                    ),
+                )
+            ]
+            if cll_info.downstream is not None
+            and cll_info.downstream.column is not None
+            else []
+        )
+        upstreams = [
+            builder.make_schema_field_urn(column_ref.table, column_ref.column)
+            for column_ref in cll_info.upstreams
+        ]
+
+        fine_grained_lineages.append(
+            FineGrainedLineage(
+                downstreamType=FineGrainedLineageDownstreamType.FIELD,
+                downstreams=downstream,
+                upstreamType=FineGrainedLineageUpstreamType.FIELD_SET,
+                upstreams=upstreams,
+            )
+        )
+
+    return fine_grained_lineages
+
+
 def get_unique_custom_sql(custom_sql_list: List[dict]) -> List[dict]:
     unique_custom_sql = []
     for custom_sql in custom_sql_list:
         unique_csql = {
             "id": custom_sql.get("id"),
             "name": custom_sql.get("name"),
+            # We assume that this is unsupported custom sql if "actual tables that this query references"
+            # are missing from api result.
+            "isUnsupportedCustomSql": True if not custom_sql.get("tables") else False,
             "query": custom_sql.get("query"),
+            "connectionType": custom_sql.get("connectionType"),
             "columns": custom_sql.get("columns"),
             "tables": custom_sql.get("tables"),
+            "database": custom_sql.get("database"),
         }
         datasource_for_csql = []
         for column in custom_sql.get("columns", []):
@@ -626,7 +891,23 @@ def clean_query(query: str) -> str:
     return query
 
 
-def query_metadata(server, main_query, connection_name, first, offset, qry_filter=""):
+def make_filter(filter_dict: dict) -> str:
+    filter = ""
+    for key, value in filter_dict.items():
+        if filter:
+            filter += ", "
+        filter += f"{key}: {json.dumps(value)}"
+    return filter
+
+
+def query_metadata(
+    server: Server,
+    main_query: str,
+    connection_name: str,
+    first: int,
+    offset: int,
+    qry_filter: str = "",
+) -> dict:
     query = """{{
         {connection_name} (first:{first}, offset:{offset}, filter:{{{filter}}})
         {{
@@ -645,3 +926,32 @@ def query_metadata(server, main_query, connection_name, first, offset, qry_filte
         main_query=main_query,
     )
     return server.metadata.query(query)
+
+
+def get_filter_pages(query_filter: dict, page_size: int) -> List[dict]:
+    filter_pages = [query_filter]
+    # If this is primary id filter so we can use divide this query list into
+    # multiple requests each with smaller filter list (of order page_size).
+    # It is observed in the past that if list of primary ids grow beyond
+    # a few ten thousands then tableau server responds with empty response
+    # causing below error:
+    # tableauserverclient.server.endpoint.exceptions.NonXMLResponseError: b''
+    if (
+        len(query_filter.keys()) == 1
+        and query_filter.get(c.ID_WITH_IN)
+        and isinstance(query_filter[c.ID_WITH_IN], list)
+        and len(query_filter[c.ID_WITH_IN]) > 100 * page_size
+    ):
+        ids = query_filter[c.ID_WITH_IN]
+        filter_pages = [
+            {
+                c.ID_WITH_IN: ids[
+                    start : (
+                        start + page_size if start + page_size < len(ids) else len(ids)
+                    )
+                ]
+            }
+            for start in range(0, len(ids), page_size)
+        ]
+
+    return filter_pages

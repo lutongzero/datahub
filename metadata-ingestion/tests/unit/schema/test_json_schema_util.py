@@ -1,3 +1,4 @@
+import json
 import logging
 import os
 import re
@@ -14,6 +15,7 @@ from datahub.metadata.com.linkedin.pegasus2avro.schema import (
     StringTypeClass,
 )
 from datahub.metadata.schema_classes import (
+    ArrayTypeClass,
     MapTypeClass,
     RecordTypeClass,
     UnionTypeClass,
@@ -26,7 +28,7 @@ SCHEMA_WITH_OPTIONAL_FIELD_VIA_UNION_TYPE = {
     "title": "TestRecord",
     "properties": {
         "my.field": {
-            "type": "string",
+            "type": ["string", "null"],
             "description": "some.doc",
         }
     },
@@ -42,6 +44,12 @@ def assert_field_paths_are_unique(fields: Iterable[SchemaField]) -> None:
 
     if fields_paths:
         assert len(fields_paths) == len(set(fields_paths))
+
+
+def assert_fields_are_valid(fields: Iterable[SchemaField]) -> None:
+    for f in fields:
+        f.validate()
+        assert isinstance(f.nativeDataType, str)
 
 
 def assert_field_paths_match(
@@ -97,6 +105,7 @@ def test_json_schema_to_mce_fields_sample_events_with_different_field_types():
         }
     ]
     assert_field_paths_match(fields, expected_field_paths)
+    assert_fields_are_valid(fields)
 
 
 def test_json_schema_to_record_with_two_fields():
@@ -121,6 +130,7 @@ def test_json_schema_to_record_with_two_fields():
         },
     ]
     assert_field_paths_match(fields, expected_field_paths)
+    assert_fields_are_valid(fields)
 
 
 def test_json_schema_to_mce_fields_toplevel_isnt_a_record():
@@ -130,6 +140,7 @@ def test_json_schema_to_mce_fields_toplevel_isnt_a_record():
         {"path": "[version=2.0].[type=string]", "type": StringTypeClass}
     ]
     assert_field_paths_match(fields, expected_field_paths)
+    assert_fields_are_valid(fields)
 
 
 def test_json_schema_with_recursion():
@@ -142,17 +153,23 @@ def test_json_schema_with_recursion():
         },
     }
     fields = list(JsonSchemaTranslator.get_fields_from_schema(schema))
+
     expected_field_paths = [
         {
             "path": "[version=2.0].[type=TreeNode].[type=integer].value",
             "type": NumberTypeClass,
         },
         {
-            "path": "[version=2.0].[type=TreeNode].[type=array].[type=TreeNode].children",
+            "path": "[version=2.0].[type=TreeNode].[type=array].children",
+            "type": ArrayTypeClass,
+        },
+        {
+            "path": "[version=2.0].[type=TreeNode].[type=array].children.[type=TreeNode].TreeNode",
             "type": RecordTypeClass,
         },
     ]
     assert_field_paths_match(fields, expected_field_paths)
+    assert_fields_are_valid(fields)
 
 
 def test_json_sample_payment_schema_to_schema_fields_with_nesting():
@@ -207,6 +224,7 @@ def test_json_sample_payment_schema_to_schema_fields_with_nesting():
     assert fields[3].description == "testDoc\nField default value: null"
     assert fields[4].description == "areaCodeDoc\nField default value: "
     assert fields[8].description == "addressDoc\nField default value: null"
+    assert_fields_are_valid(fields)
 
 
 def test_json_schema_to_schema_fields_with_nesting_across_records():
@@ -359,10 +377,13 @@ def test_nested_arrays():
 
     fields = list(JsonSchemaTranslator.get_fields_from_schema(schema))
     expected_field_paths: List[str] = [
-        "[version=2.0].[type=NestedArray].[type=array].[type=array].[type=Foo].ar",
-        "[version=2.0].[type=NestedArray].[type=array].[type=array].[type=Foo].ar.[type=integer].a",
+        "[version=2.0].[type=NestedArray].[type=array].ar",
+        "[version=2.0].[type=NestedArray].[type=array].ar.[type=array].array",
+        "[version=2.0].[type=NestedArray].[type=array].ar.[type=array].array.[type=Foo].Foo",
+        "[version=2.0].[type=NestedArray].[type=array].ar.[type=array].array.[type=Foo].Foo.[type=integer].a",
     ]
     assert_field_paths_match(fields, expected_field_paths)
+    assert isinstance(fields[0].type.type, ArrayTypeClass)
 
 
 def test_map_of_union_of_int_and_record_of_union():
@@ -482,14 +503,17 @@ def test_needs_disambiguation_nested_union_of_records_with_same_field_name():
         },
     }
     fields = list(JsonSchemaTranslator.get_fields_from_schema(schema))
+
     expected_field_paths: List[str] = [
         "[version=2.0].[type=ABFooUnion].[type=union].a",
         "[version=2.0].[type=ABFooUnion].[type=union].[type=A].a",
         "[version=2.0].[type=ABFooUnion].[type=union].[type=A].a.[type=string].f",
         "[version=2.0].[type=ABFooUnion].[type=union].[type=B].a",
         "[version=2.0].[type=ABFooUnion].[type=union].[type=B].a.[type=string].f",
-        "[version=2.0].[type=ABFooUnion].[type=union].[type=array].[type=array].[type=Foo].a",
-        "[version=2.0].[type=ABFooUnion].[type=union].[type=array].[type=array].[type=Foo].a.[type=integer].f",
+        "[version=2.0].[type=ABFooUnion].[type=union].[type=array].a",
+        "[version=2.0].[type=ABFooUnion].[type=union].[type=array].a.[type=array].array",
+        "[version=2.0].[type=ABFooUnion].[type=union].[type=array].a.[type=array].array.[type=Foo].Foo",
+        "[version=2.0].[type=ABFooUnion].[type=union].[type=array].a.[type=array].array.[type=Foo].Foo.[type=integer].f",
     ]
     assert_field_paths_match(fields, expected_field_paths)
 
@@ -564,8 +588,10 @@ def test_key_schema_handling():
         "[version=2.0].[key=True].[type=ABFooUnion].[type=union].[type=A].a.[type=string].f",
         "[version=2.0].[key=True].[type=ABFooUnion].[type=union].[type=B].a",
         "[version=2.0].[key=True].[type=ABFooUnion].[type=union].[type=B].a.[type=string].f",
-        "[version=2.0].[key=True].[type=ABFooUnion].[type=union].[type=array].[type=array].[type=Foo].a",
-        "[version=2.0].[key=True].[type=ABFooUnion].[type=union].[type=array].[type=array].[type=Foo].a.[type=number].f",
+        "[version=2.0].[key=True].[type=ABFooUnion].[type=union].[type=array].a",
+        "[version=2.0].[key=True].[type=ABFooUnion].[type=union].[type=array].a.[type=array].array",
+        "[version=2.0].[key=True].[type=ABFooUnion].[type=union].[type=array].a.[type=array].array.[type=Foo].Foo",
+        "[version=2.0].[key=True].[type=ABFooUnion].[type=union].[type=array].a.[type=array].array.[type=Foo].Foo.[type=number].f",
     ]
     assert_field_paths_match(fields, expected_field_paths)
     for f in fields:
@@ -583,3 +609,281 @@ def test_ignore_exceptions():
         JsonSchemaTranslator.get_fields_from_schema(malformed_schema)
     )
     assert not fields
+
+
+SCHEMA_WITH_ARRAY_TYPE = {
+    "title": "Administrative-Unit",
+    "type": "object",
+    "properties": {
+        "Identifier": {"type": ["integer"]},
+        "ValidFrom": {"format": "date", "type": ["string"]},
+        "ValidTo": {"format": "date", "type": ["string", "null"]},
+        "Level": {"minimum": 1, "maximum": 3, "type": ["integer"]},
+        "Parent": {"type": ["integer", "null"]},
+        "Name_en": {"type": ["string", "null"]},
+        "Name_fr": {"type": ["string", "null"]},
+        "Name_de": {"type": ["string", "null"]},
+        "Name_it": {"type": ["string", "null"]},
+        "ABBREV_1_Text_en": {"type": ["string", "null"]},
+        "ABBREV_1_Text_fr": {"type": ["string", "null"]},
+        "ABBREV_1_Text_de": {"type": ["string", "null"]},
+        "ABBREV_1_Text_it": {"type": ["string", "null"]},
+        "ABBREV_1_Text": {"type": ["string", "null"]},
+        "CODE_OFS_1_Text_en": {"type": ["integer", "null"]},
+        "CODE_OFS_1_Text_fr": {"type": ["integer", "null"]},
+        "CODE_OFS_1_Text_de": {"type": ["integer", "null"]},
+        "CODE_OFS_1_Text_it": {"type": ["integer", "null"]},
+        "CODE_OFS_1_Text": {"type": ["integer", "null"]},
+    },
+}
+
+
+def test_array_handling():
+    schema = SCHEMA_WITH_ARRAY_TYPE
+    fields = list(JsonSchemaTranslator.get_fields_from_schema(schema))
+    expected_field_paths: List[str] = [
+        "[version=2.0].[type=Administrative-Unit].[type=integer].Identifier",
+        "[version=2.0].[type=Administrative-Unit].[type=string(date)].ValidFrom",
+        "[version=2.0].[type=Administrative-Unit].[type=string(date)].ValidTo",
+        "[version=2.0].[type=Administrative-Unit].[type=integer].Level",
+        "[version=2.0].[type=Administrative-Unit].[type=integer].Parent",
+        "[version=2.0].[type=Administrative-Unit].[type=string].Name_en",
+        "[version=2.0].[type=Administrative-Unit].[type=string].Name_fr",
+        "[version=2.0].[type=Administrative-Unit].[type=string].Name_de",
+        "[version=2.0].[type=Administrative-Unit].[type=string].Name_it",
+        "[version=2.0].[type=Administrative-Unit].[type=string].ABBREV_1_Text_en",
+        "[version=2.0].[type=Administrative-Unit].[type=string].ABBREV_1_Text_fr",
+        "[version=2.0].[type=Administrative-Unit].[type=string].ABBREV_1_Text_de",
+        "[version=2.0].[type=Administrative-Unit].[type=string].ABBREV_1_Text_it",
+        "[version=2.0].[type=Administrative-Unit].[type=string].ABBREV_1_Text",
+        "[version=2.0].[type=Administrative-Unit].[type=integer].CODE_OFS_1_Text_en",
+        "[version=2.0].[type=Administrative-Unit].[type=integer].CODE_OFS_1_Text_fr",
+        "[version=2.0].[type=Administrative-Unit].[type=integer].CODE_OFS_1_Text_de",
+        "[version=2.0].[type=Administrative-Unit].[type=integer].CODE_OFS_1_Text_it",
+        "[version=2.0].[type=Administrative-Unit].[type=integer].CODE_OFS_1_Text",
+    ]
+    assert_field_paths_match(fields, expected_field_paths)
+    assert_fields_are_valid(fields)
+
+
+def test_simple_array():
+    schema = {
+        "type": "object",
+        "title": "ObjectWithArray",
+        "namespace": "com.linkedin",
+        "properties": {"ar": {"type": "array", "items": {"type": "string"}}},
+    }
+
+    fields = list(JsonSchemaTranslator.get_fields_from_schema(schema))
+    expected_field_paths: List[str] = [
+        "[version=2.0].[type=ObjectWithArray].[type=array].ar",
+        "[version=2.0].[type=ObjectWithArray].[type=array].ar.[type=string].string",
+    ]
+    assert_field_paths_match(fields, expected_field_paths)
+    assert isinstance(fields[0].type.type, ArrayTypeClass)
+
+
+def test_simple_object():
+    schema = {
+        "type": "object",
+        "title": "Object With Object",
+        "namespace": "io.datahubproject",
+        "properties": {"inner": {"type": "object"}},
+    }
+
+    fields = list(JsonSchemaTranslator.get_fields_from_schema(schema))
+    expected_field_paths: List[str] = [
+        "[version=2.0].[type=Object With Object].[type=object].inner",
+    ]
+    assert_field_paths_match(fields, expected_field_paths)
+    assert isinstance(fields[0].type.type, RecordTypeClass)
+
+
+def test_required_field():
+    schema = {
+        "$id": "test",
+        "$schema": "http://json-schema.org/draft-06/schema#",
+        "properties": {
+            "a_str": {
+                "description": "Example String",
+                "type": "string",
+            },
+            "b_str": {"type": ["string", "null"]},
+        },
+        "required": ["b_str"],
+    }
+    fields = list(JsonSchemaTranslator.get_fields_from_schema(schema))
+    expected_field_paths: List[str] = [
+        "[version=2.0].[type=object].[type=string].a_str",
+        "[version=2.0].[type=object].[type=string].b_str",
+    ]
+    assert_field_paths_match(fields, expected_field_paths)
+    assert_fields_are_valid(fields)
+    assert fields[0].nullable is False
+    assert fields[1].nullable is True
+    assert json.loads(fields[1].jsonProps or "{}")["required"] is True
+    assert json.loads(fields[0].jsonProps or "{}")["required"] is False
+
+
+def test_non_str_enums():
+    schema = {
+        "$id": "test",
+        "$schema": "http://json-schema.org/draft-06/schema#",
+        "properties": {"bar": {"description": "Mixed enum", "enum": ["baz", 1, None]}},
+    }
+
+    fields = list(JsonSchemaTranslator.get_fields_from_schema(schema))
+    expected_field_paths: List[str] = ["[version=2.0].[type=object].[type=enum].bar"]
+    assert_field_paths_match(fields, expected_field_paths)
+    assert fields[0].description == 'One of: "baz", 1, null'
+
+
+def test_const_description_pulled_correctly():
+    schema = {
+        "$id": "test",
+        "$schema": "http://json-schema.org/draft-07/schema#",
+        "properties": {"bar": {"type": "string", "const": "not_defined"}},
+    }
+
+    fields = list(JsonSchemaTranslator.get_fields_from_schema(schema))
+    expected_field_paths: List[str] = ["[version=2.0].[type=object].[type=string].bar"]
+    assert_field_paths_match(fields, expected_field_paths)
+    assert fields[0].description == "Const value: not_defined"
+
+
+def test_anyof_with_properties():
+    # We expect the event / timestamp fields to be included in both branches of the anyOf.
+
+    schema = {
+        "$id": "test",
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "additionalProperties": False,
+        "anyOf": [{"required": ["anonymousId"]}, {"required": ["userId"]}],
+        "properties": {
+            "anonymousId": {
+                "description": "A temporary user id, used before a user logs in.",
+                "format": "uuid",
+                "type": "string",
+            },
+            "userId": {
+                "description": "Unique user id.",
+                "type": "string",
+            },
+            "event": {"description": "Unique name of the event.", "type": "string"},
+            "timestamp": {
+                "description": "Timestamp of when the message itself took place.",
+                "type": "string",
+            },
+        },
+        "required": ["event"],
+        "type": "object",
+    }
+
+    fields = list(JsonSchemaTranslator.get_fields_from_schema(schema))
+    expected_field_paths: List[str] = [
+        "[version=2.0].[type=union].[type=union_0].[type=string(uuid)].anonymousId",
+        "[version=2.0].[type=union].[type=union_0].[type=string].userId",
+        "[version=2.0].[type=union].[type=union_0].[type=string].event",
+        "[version=2.0].[type=union].[type=union_0].[type=string].timestamp",
+        "[version=2.0].[type=union].[type=union_1].[type=string(uuid)].anonymousId",
+        "[version=2.0].[type=union].[type=union_1].[type=string].userId",
+        "[version=2.0].[type=union].[type=union_1].[type=string].event",
+        "[version=2.0].[type=union].[type=union_1].[type=string].timestamp",
+    ]
+    assert_field_paths_match(fields, expected_field_paths)
+    assert_fields_are_valid(fields)
+
+    # In the first one, the anonymousId is required, but the userId is not.
+    assert json.loads(fields[0].jsonProps or "{}")["required"] is True
+    assert json.loads(fields[1].jsonProps or "{}")["required"] is False
+
+    # In the second one, the userId is required, but the anonymousId is not.
+    assert json.loads(fields[4].jsonProps or "{}")["required"] is False
+    assert json.loads(fields[5].jsonProps or "{}")["required"] is True
+
+    # The event field is required in both branches.
+    assert json.loads(fields[2].jsonProps or "{}")["required"] is True
+    assert json.loads(fields[6].jsonProps or "{}")["required"] is True
+
+    # The timestamp field is not required in either branch.
+    assert json.loads(fields[3].jsonProps or "{}")["required"] is False
+    assert json.loads(fields[7].jsonProps or "{}")["required"] is False
+
+
+def test_top_level_trival_allof():
+    schema = {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "$id": "event-wrapper",
+        "type": "object",
+        "allOf": [
+            {
+                "$schema": "https://json-schema.org/draft/2020-12/schema",
+                "$id": "event",
+                "properties": {
+                    "userId": {
+                        "description": "Unique user id.",
+                        "type": "string",
+                    },
+                    "event": {
+                        "description": "Unique name of the event.",
+                        "type": "string",
+                    },
+                    "timestamp": {
+                        "description": "Timestamp of when the message itself took place.",
+                        "type": "string",
+                    },
+                },
+                "required": ["event"],
+                "type": "object",
+                "additionalProperties": False,
+            },
+        ],
+        "properties": {
+            "extra-top-level-property": {
+                "type": "string",
+            },
+        },
+    }
+
+    fields = list(JsonSchemaTranslator.get_fields_from_schema(schema))
+    expected_field_paths: List[str] = [
+        "[version=2.0].[type=object].[type=string].extra-top-level-property",
+        "[version=2.0].[type=object].[type=string].userId",
+        "[version=2.0].[type=object].[type=string].event",
+        "[version=2.0].[type=object].[type=string].timestamp",
+    ]
+    assert_field_paths_match(fields, expected_field_paths)
+    assert_fields_are_valid(fields)
+
+    assert json.loads(fields[0].jsonProps or "{}")["required"] is False
+    assert json.loads(fields[1].jsonProps or "{}")["required"] is False
+    assert json.loads(fields[2].jsonProps or "{}")["required"] is True
+    assert json.loads(fields[3].jsonProps or "{}")["required"] is False
+
+
+def test_description_extraction():
+    schema = {
+        "$id": "test",
+        "$schema": "http://json-schema.org/draft-07/schema#",
+        "properties": {
+            "bar": {
+                "type": "array",
+                "items": {"type": "string"},
+                "description": "XYZ",
+            }
+        },
+    }
+    fields = list(JsonSchemaTranslator.get_fields_from_schema(schema))
+    expected_field_paths: List[str] = [
+        "[version=2.0].[type=object].[type=array].bar",
+        "[version=2.0].[type=object].[type=array].bar.[type=string].string",
+    ]
+    assert_field_paths_match(fields, expected_field_paths)
+    assert_fields_are_valid(fields)
+    # Additional check for the description extraction
+    array_field = next(
+        field
+        for field in fields
+        if field.fieldPath == "[version=2.0].[type=object].[type=array].bar"
+    )
+    assert array_field.description == "XYZ"

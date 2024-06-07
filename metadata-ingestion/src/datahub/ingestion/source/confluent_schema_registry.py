@@ -4,12 +4,13 @@ from dataclasses import dataclass
 from hashlib import md5
 from typing import Any, List, Optional, Set, Tuple
 
-import confluent_kafka
+import avro.schema
 import jsonref
 from confluent_kafka.schema_registry.schema_registry_client import (
     RegisteredSchema,
     Schema,
     SchemaReference,
+    SchemaRegistryClient,
 )
 
 from datahub.ingestion.extractor import protobuf_util, schema_util
@@ -22,6 +23,8 @@ from datahub.metadata.com.linkedin.pegasus2avro.schema import (
     SchemaField,
     SchemaMetadata,
 )
+from datahub.metadata.schema_classes import OwnershipSourceTypeClass
+from datahub.utilities.mapping import OperationProcessor
 
 logger = logging.getLogger(__name__)
 
@@ -45,14 +48,11 @@ class ConfluentSchemaRegistry(KafkaSchemaRegistryBase):
     ) -> None:
         self.source_config: KafkaSourceConfig = source_config
         self.report: KafkaSourceReport = report
-        # Use the fully qualified name for SchemaRegistryClient to make it mock patchable for testing.
-        self.schema_registry_client = (
-            confluent_kafka.schema_registry.schema_registry_client.SchemaRegistryClient(
-                {
-                    "url": source_config.connection.schema_registry_url,
-                    **source_config.connection.schema_registry_config,
-                }
-            )
+        self.schema_registry_client = SchemaRegistryClient(
+            {
+                "url": source_config.connection.schema_registry_url,
+                **source_config.connection.schema_registry_config,
+            }
         )
         self.known_schema_registry_subjects: List[str] = []
         try:
@@ -61,6 +61,14 @@ class ConfluentSchemaRegistry(KafkaSchemaRegistryBase):
             )
         except Exception as e:
             logger.warning(f"Failed to get subjects from schema registry: {e}")
+
+        self.field_meta_processor = OperationProcessor(
+            self.source_config.field_meta_mapping,
+            self.source_config.tag_prefix,
+            OwnershipSourceTypeClass.SERVICE,
+            self.source_config.strip_user_ids_from_email,
+            match_nested_props=True,
+        )
 
     @classmethod
     def create(
@@ -83,8 +91,21 @@ class ConfluentSchemaRegistry(KafkaSchemaRegistryBase):
         # Subject name format when the schema registry subject name strategy is
         #  (a) TopicNameStrategy(default strategy): <topic name>-<key/value>
         #  (b) TopicRecordNameStrategy: <topic name>-<fully-qualified record name>-<key/value>
+        #  there's a third case
+        #  (c) TopicNameStrategy differing by environment name suffixes.
+        #       e.g "a.b.c.d-value" and "a.b.c.d.qa-value"
+        #       For such instances, the wrong schema registry entries could picked by the previous logic.
         for subject in self.known_schema_registry_subjects:
-            if subject.startswith(topic) and subject.endswith(subject_key_suffix):
+            if (
+                self.source_config.disable_topic_record_naming_strategy
+                and subject == subject_key
+            ):
+                return subject
+            if (
+                (not self.source_config.disable_topic_record_naming_strategy)
+                and subject.startswith(topic)
+                and subject.endswith(subject_key_suffix)
+            ):
                 return subject
         return None
 
@@ -103,7 +124,7 @@ class ConfluentSchemaRegistry(KafkaSchemaRegistryBase):
             schema_seen = set()
         schema_str = self._compact_schema(schema.schema_str)
         for schema_ref in schema.references:
-            ref_subject = schema_ref["subject"]
+            ref_subject = schema_ref.subject
             if ref_subject in schema_seen:
                 continue
 
@@ -122,7 +143,7 @@ class ConfluentSchemaRegistry(KafkaSchemaRegistryBase):
             # Replace only external type references with the reference schema recursively.
             # NOTE: The type pattern is dependent on _compact_schema.
             avro_type_kwd = '"type"'
-            ref_name = schema_ref["name"]
+            ref_name = schema_ref.name
             # Try by name first
             pattern_to_replace = f'{avro_type_kwd}:"{ref_name}"'
             if pattern_to_replace not in schema_str:
@@ -154,7 +175,7 @@ class ConfluentSchemaRegistry(KafkaSchemaRegistryBase):
 
         schema_ref: SchemaReference
         for schema_ref in schema.references:
-            ref_subject: str = schema_ref["subject"]
+            ref_subject: str = schema_ref.subject
             if ref_subject in schema_seen:
                 continue
             reference_schema: RegisteredSchema = (
@@ -163,7 +184,7 @@ class ConfluentSchemaRegistry(KafkaSchemaRegistryBase):
             schema_seen.add(ref_subject)
             all_schemas.append(
                 ProtobufSchema(
-                    name=schema_ref["name"], content=reference_schema.schema.schema_str
+                    name=schema_ref.name, content=reference_schema.schema.schema_str
                 )
             )
         return all_schemas
@@ -182,19 +203,19 @@ class ConfluentSchemaRegistry(KafkaSchemaRegistryBase):
 
         schema_ref: SchemaReference
         for schema_ref in schema.references:
-            ref_subject: str = schema_ref["subject"]
+            ref_subject: str = schema_ref.subject
             if ref_subject in schema_seen:
                 continue
             reference_schema: RegisteredSchema = (
                 self.schema_registry_client.get_version(
-                    subject_name=ref_subject, version=schema_ref["version"]
+                    subject_name=ref_subject, version=schema_ref.version
                 )
             )
             schema_seen.add(ref_subject)
             all_schemas.extend(
                 self.get_schemas_from_confluent_ref_json(
                     reference_schema.schema,
-                    name=schema_ref["name"],
+                    name=schema_ref.name,
                     subject=ref_subject,
                     schema_seen=schema_seen,
                 )
@@ -257,14 +278,12 @@ class ConfluentSchemaRegistry(KafkaSchemaRegistryBase):
     def _load_json_schema_with_resolved_references(
         self, schema: Schema, name: str, subject: str
     ) -> dict:
-
         imported_json_schemas: List[
             JsonSchemaWrapper
         ] = self.get_schemas_from_confluent_ref_json(schema, name=name, subject=subject)
         schema_dict = json.loads(schema.schema_str)
         reference_map = {}
         for imported_schema in imported_json_schemas:
-
             reference_schema = json.loads(imported_schema.content)
             if "title" not in reference_schema:
                 reference_schema["title"] = imported_schema.subject
@@ -282,10 +301,19 @@ class ConfluentSchemaRegistry(KafkaSchemaRegistryBase):
         fields: List[SchemaField] = []
         if schema.schema_type == "AVRO":
             cleaned_str: str = self.get_schema_str_replace_confluent_ref_avro(schema)
+            avro_schema = avro.schema.parse(cleaned_str)
+
             # "value.id" or "value.[type=string]id"
             fields = schema_util.avro_schema_to_mce_fields(
-                cleaned_str, is_key_schema=is_key_schema
+                avro_schema,
+                is_key_schema=is_key_schema,
+                meta_mapping_processor=self.field_meta_processor
+                if self.source_config.enable_meta_mapping
+                else None,
+                schema_tags_field=self.source_config.schema_tags_field,
+                tag_prefix=self.source_config.tag_prefix,
             )
+
         elif schema.schema_type == "PROTOBUF":
             imported_schemas: List[
                 ProtobufSchema
@@ -350,8 +378,10 @@ class ConfluentSchemaRegistry(KafkaSchemaRegistryBase):
                 hash=md5_hash,
                 platform=platform_urn,
                 platformSchema=KafkaSchema(
-                    documentSchema=schema.schema_str if schema is not None else "",
+                    documentSchema=schema.schema_str if schema else "",
+                    documentSchemaType=schema.schema_type if schema else None,
                     keySchema=key_schema.schema_str if key_schema else None,
+                    keySchemaType=key_schema.schema_type if key_schema else None,
                 ),
                 fields=key_fields + fields,
             )
@@ -385,8 +415,10 @@ class ConfluentSchemaRegistry(KafkaSchemaRegistryBase):
                 hash=md5_hash,
                 platform=platform_urn,
                 platformSchema=KafkaSchema(
-                    documentSchema=schema.schema_str if schema is not None else "",
+                    documentSchema=schema.schema_str if schema else "",
+                    documentSchemaType=schema.schema_type if schema else None,
                     keySchema=key_schema.schema_str if key_schema else None,
+                    keySchemaType=key_schema.schema_type if key_schema else None,
                 ),
                 fields=key_fields + fields,
             )

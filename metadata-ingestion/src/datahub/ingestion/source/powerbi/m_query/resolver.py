@@ -6,63 +6,223 @@ from typing import Any, Dict, List, Optional, Tuple, Type, Union, cast
 
 from lark import Tree
 
-from datahub.ingestion.source.powerbi.config import PowerBiDashboardSourceReport
+import datahub.emitter.mce_builder as builder
+from datahub.ingestion.api.common import PipelineContext
+from datahub.ingestion.source.powerbi.config import (
+    DataBricksPlatformDetail,
+    DataPlatformPair,
+    PlatformDetail,
+    PowerBiDashboardSourceConfig,
+    PowerBiDashboardSourceReport,
+    PowerBIPlatformDetail,
+    SupportedDataPlatform,
+)
+from datahub.ingestion.source.powerbi.dataplatform_instance_resolver import (
+    AbstractDataPlatformInstanceResolver,
+)
 from datahub.ingestion.source.powerbi.m_query import native_sql_parser, tree_function
 from datahub.ingestion.source.powerbi.m_query.data_classes import (
+    TRACE_POWERBI_MQUERY_PARSER,
+    AbstractIdentifierAccessor,
     DataAccessFunctionDetail,
     IdentifierAccessor,
 )
 from datahub.ingestion.source.powerbi.rest_api_wrapper.data_classes import Table
+from datahub.sql_parsing.sqlglot_lineage import ColumnLineageInfo, SqlParsingResult
 
 logger = logging.getLogger(__name__)
 
 
 @dataclass
-class DataPlatformPair:
-    datahub_data_platform_name: str
-    powerbi_data_platform_name: str
+class DataPlatformTable:
+    data_platform_pair: DataPlatformPair
+    urn: str
 
 
 @dataclass
-class DataPlatformTable:
-    name: str
-    full_name: str
-    data_platform_pair: DataPlatformPair
+class Lineage:
+    upstreams: List[DataPlatformTable]
+    column_lineage: List[ColumnLineageInfo]
+
+    @staticmethod
+    def empty() -> "Lineage":
+        return Lineage(upstreams=[], column_lineage=[])
 
 
-class SupportedDataPlatform(Enum):
-    POSTGRES_SQL = DataPlatformPair(
-        powerbi_data_platform_name="PostgreSQL", datahub_data_platform_name="postgres"
+def urn_to_lowercase(value: str, flag: bool) -> str:
+    if flag is True:
+        return value.lower()
+
+    return value
+
+
+def urn_creator(
+    config: PowerBiDashboardSourceConfig,
+    platform_instance_resolver: AbstractDataPlatformInstanceResolver,
+    data_platform_pair: DataPlatformPair,
+    server: str,
+    qualified_table_name: str,
+) -> str:
+
+    platform_detail: PlatformDetail = platform_instance_resolver.get_platform_instance(
+        PowerBIPlatformDetail(
+            data_platform_pair=data_platform_pair,
+            data_platform_server=server,
+        )
     )
 
-    ORACLE = DataPlatformPair(
-        powerbi_data_platform_name="Oracle", datahub_data_platform_name="oracle"
-    )
-
-    SNOWFLAKE = DataPlatformPair(
-        powerbi_data_platform_name="Snowflake", datahub_data_platform_name="snowflake"
-    )
-
-    MS_SQL = DataPlatformPair(
-        powerbi_data_platform_name="Sql", datahub_data_platform_name="mssql"
+    return builder.make_dataset_urn_with_platform_instance(
+        platform=data_platform_pair.datahub_data_platform_name,
+        platform_instance=platform_detail.platform_instance,
+        env=platform_detail.env,
+        name=urn_to_lowercase(
+            qualified_table_name, config.convert_lineage_urns_to_lowercase
+        ),
     )
 
 
-class AbstractTableFullNameCreator(ABC):
+class AbstractDataPlatformTableCreator(ABC):
+    """
+    Base class to share common functionalities among different dataplatform for M-Query parsing.
+
+    To create qualified table name we need to parse M-Query data-access-functions(https://learn.microsoft.com/en-us/powerquery-m/accessing-data-functions) and
+    the data-access-functions has some define pattern to access database-name, schema-name and table-name, for example see below M-Query.
+
+        let
+            Source = Sql.Database("localhost", "library"),
+            dbo_book_issue = Source{[Schema="dbo",Item="book_issue"]}[Data]
+        in
+            dbo_book_issue
+
+    It is MSSQL M-Query and Sql.Database is the data-access-function to access MSSQL. If this function is available in M-Query then database name is available in second argument
+    of first statement and schema-name and table-name is available in second statement. second statement can be repeated to access different tables from MSSQL.
+
+    DefaultTwoStepDataAccessSources extends the AbstractDataPlatformTableCreator and provides the common functionalities for data-platform which has above type of M-Query pattern
+
+    data-access-function varies as per data-platform for example for MySQL.Database for MySQL, PostgreSQL.Database for Postgres and Oracle.Database for Oracle and number of statement to
+    find out database-name , schema-name and table-name also varies as per dataplatform.
+
+    Value.NativeQuery is one of the function which is used to execute native query inside M-Query, for example see below M-Query
+
+        let
+            Source = Value.NativeQuery(AmazonRedshift.Database("redshift-url","dev"), "select * from dev.public.category", null, [EnableFolding=true])
+        in
+            Source
+
+    In this M-Query database-name is available in first argument and rest of the detail i.e database & schema is available in native query.
+
+    NativeQueryDataPlatformTableCreator extends AbstractDataPlatformTableCreator to support Redshift and Snowflake native query parsing.
+
+    """
+
+    ctx: PipelineContext
+    config: PowerBiDashboardSourceConfig
+    platform_instance_resolver: AbstractDataPlatformInstanceResolver
+
+    def __init__(
+        self,
+        ctx: PipelineContext,
+        config: PowerBiDashboardSourceConfig,
+        platform_instance_resolver: AbstractDataPlatformInstanceResolver,
+    ) -> None:
+        super().__init__()
+        self.ctx = ctx
+        self.config = config
+        self.platform_instance_resolver = platform_instance_resolver
+
     @abstractmethod
-    def get_full_table_names(
+    def create_lineage(
         self, data_access_func_detail: DataAccessFunctionDetail
-    ) -> List[str]:
+    ) -> Lineage:
         pass
 
     @abstractmethod
     def get_platform_pair(self) -> DataPlatformPair:
         pass
 
+    @staticmethod
+    def get_db_detail_from_argument(
+        arg_list: Tree,
+    ) -> Tuple[Optional[str], Optional[str]]:
+        arguments: List[str] = tree_function.strip_char_from_list(
+            values=tree_function.remove_whitespaces_from_list(
+                tree_function.token_values(arg_list)
+            ),
+        )
+
+        if len(arguments) < 2:
+            logger.debug(f"Expected minimum 2 arguments, but got {len(arguments)}")
+            return None, None
+
+        return arguments[0], arguments[1]
+
+    @staticmethod
+    def get_tokens(
+        arg_list: Tree,
+    ) -> List[str]:
+        arguments: List[str] = tree_function.strip_char_from_list(
+            values=tree_function.remove_whitespaces_from_list(
+                tree_function.token_values(arg_list)
+            ),
+        )
+        return arguments
+
+    def parse_custom_sql(
+        self, query: str, server: str, database: Optional[str], schema: Optional[str]
+    ) -> Lineage:
+
+        dataplatform_tables: List[DataPlatformTable] = []
+
+        platform_detail: PlatformDetail = (
+            self.platform_instance_resolver.get_platform_instance(
+                PowerBIPlatformDetail(
+                    data_platform_pair=self.get_platform_pair(),
+                    data_platform_server=server,
+                )
+            )
+        )
+
+        parsed_result: Optional[
+            "SqlParsingResult"
+        ] = native_sql_parser.parse_custom_sql(
+            ctx=self.ctx,
+            query=query,
+            platform=self.get_platform_pair().datahub_data_platform_name,
+            platform_instance=platform_detail.platform_instance,
+            env=platform_detail.env,
+            database=database,
+            schema=schema,
+        )
+
+        if parsed_result is None:
+            logger.debug("Failed to parse query")
+            return Lineage.empty()
+
+        for urn in parsed_result.in_tables:
+            dataplatform_tables.append(
+                DataPlatformTable(
+                    data_platform_pair=self.get_platform_pair(),
+                    urn=urn,
+                )
+            )
+
+        logger.debug(f"Native Query parsed result={parsed_result}")
+        logger.debug(f"Generated dataplatform_tables={dataplatform_tables}")
+
+        return Lineage(
+            upstreams=dataplatform_tables,
+            column_lineage=(
+                parsed_result.column_lineage
+                if parsed_result.column_lineage is not None
+                else []
+            ),
+        )
+
 
 class AbstractDataAccessMQueryResolver(ABC):
     table: Table
     parse_tree: Tree
+    parameters: Dict[str, str]
     reporter: PowerBiDashboardSourceReport
     data_access_functions: List[str]
 
@@ -71,23 +231,42 @@ class AbstractDataAccessMQueryResolver(ABC):
         table: Table,
         parse_tree: Tree,
         reporter: PowerBiDashboardSourceReport,
+        parameters: Dict[str, str],
     ):
         self.table = table
         self.parse_tree = parse_tree
         self.reporter = reporter
+        self.parameters = parameters
         self.data_access_functions = SupportedResolver.get_function_names()
 
     @abstractmethod
-    def resolve_to_data_platform_table_list(self) -> List[DataPlatformTable]:
+    def resolve_to_data_platform_table_list(
+        self,
+        ctx: PipelineContext,
+        config: PowerBiDashboardSourceConfig,
+        platform_instance_resolver: AbstractDataPlatformInstanceResolver,
+    ) -> List[Lineage]:
         pass
 
 
 class MQueryResolver(AbstractDataAccessMQueryResolver, ABC):
-    @staticmethod
+    """
+    This class parses the M-Query recursively to generate DataAccessFunctionDetail (see method create_data_access_functional_detail).
+
+    This class has generic code to process M-Query tokens and create instance of DataAccessFunctionDetail.
+
+    Once DataAccessFunctionDetail instance is initialized thereafter MQueryResolver generates the DataPlatformTable with the help of AbstractDataPlatformTableCreator
+    (see method resolve_to_data_platform_table_list).
+
+    Classes which extended from AbstractDataPlatformTableCreator knows how to convert generated DataAccessFunctionDetail instance
+    to respective DataPlatformTable instance as per dataplatform.
+
+    """
+
     def get_item_selector_tokens(
+        self,
         expression_tree: Tree,
     ) -> Tuple[Optional[str], Optional[Dict[str, str]]]:
-
         item_selector: Optional[Tree] = tree_function.first_item_selector_func(
             expression_tree
         )
@@ -107,9 +286,10 @@ class MQueryResolver(AbstractDataAccessMQueryResolver, ABC):
         # remove whitespaces and quotes from token
         tokens: List[str] = tree_function.strip_char_from_list(
             tree_function.remove_whitespaces_from_list(
-                tree_function.token_values(cast(Tree, item_selector))
+                tree_function.token_values(
+                    cast(Tree, item_selector), parameters=self.parameters
+                )
             ),
-            '"',
         )
         identifier: List[str] = tree_function.token_values(
             cast(Tree, identifier_tree)
@@ -134,7 +314,6 @@ class MQueryResolver(AbstractDataAccessMQueryResolver, ABC):
     def _process_invoke_expression(
         self, invoke_expression: Tree
     ) -> Union[DataAccessFunctionDetail, List[str], None]:
-
         letter_tree: Tree = invoke_expression.children[0]
         data_access_func: str = tree_function.make_function_name(letter_tree)
         # The invoke function is either DataAccess function like PostgreSQL.Database(<argument-list>) or
@@ -181,7 +360,10 @@ class MQueryResolver(AbstractDataAccessMQueryResolver, ABC):
             first_argument
         )
 
-        logger.debug(f"Extracting token from tree {first_argument.pretty()}")
+        if TRACE_POWERBI_MQUERY_PARSER:
+            logger.debug(f"Extracting token from tree {first_argument.pretty()}")
+        else:
+            logger.debug(f"Extracting token from tree {first_argument}")
         if expression is None:
             expression = tree_function.first_type_expression_func(first_argument)
             if expression is None:
@@ -216,7 +398,6 @@ class MQueryResolver(AbstractDataAccessMQueryResolver, ABC):
         new_identifier: str,
         key_vs_value: Dict[str, Any],
     ) -> IdentifierAccessor:
-
         # It is first identifier_accessor
         if identifier_accessor is None:
             return IdentifierAccessor(
@@ -283,9 +464,7 @@ class MQueryResolver(AbstractDataAccessMQueryResolver, ABC):
                 if result is None:
                     return None  # No need to process some un-expected grammar found while processing invoke_expression
                 if isinstance(result, DataAccessFunctionDetail):
-                    cast(
-                        DataAccessFunctionDetail, result
-                    ).identifier_accessor = identifier_accessor
+                    result.identifier_accessor = identifier_accessor
                     table_links.append(result)  # Link of a table is completed
                     identifier_accessor = (
                         None  # reset the identifier_accessor for other table
@@ -317,9 +496,15 @@ class MQueryResolver(AbstractDataAccessMQueryResolver, ABC):
 
         return table_links
 
-    def resolve_to_data_platform_table_list(self) -> List[DataPlatformTable]:
-        data_platform_tables: List[DataPlatformTable] = []
+    def resolve_to_data_platform_table_list(
+        self,
+        ctx: PipelineContext,
+        config: PowerBiDashboardSourceConfig,
+        platform_instance_resolver: AbstractDataPlatformInstanceResolver,
+    ) -> List[Lineage]:
+        lineage: List[Lineage] = []
 
+        # Find out output variable as we are doing backtracking in M-Query
         output_variable: Optional[str] = tree_function.get_output_variable(
             self.parse_tree
         )
@@ -329,14 +514,16 @@ class MQueryResolver(AbstractDataAccessMQueryResolver, ABC):
                 f"{self.table.full_name}-output-variable",
                 "output-variable not found in table expression",
             )
-            return data_platform_tables
+            return lineage
 
+        # Parse M-Query and use output_variable as root of tree and create instance of DataAccessFunctionDetail
         table_links: List[
             DataAccessFunctionDetail
         ] = self.create_data_access_functional_detail(output_variable)
 
         # Each item is data-access function
         for f_detail in table_links:
+            # Get & Check if we support data-access-function available in M-Query
             supported_resolver = SupportedResolver.get_resolver(
                 f_detail.data_access_function_name
             )
@@ -350,25 +537,22 @@ class MQueryResolver(AbstractDataAccessMQueryResolver, ABC):
                 )
                 continue
 
-            table_full_name_creator: AbstractTableFullNameCreator = (
-                supported_resolver.get_table_full_name_creator()()
+            # From supported_resolver enum get respective resolver like AmazonRedshift or Snowflake or Oracle or NativeQuery and create instance of it
+            # & also pass additional information that will be need to generate urn
+            table_qualified_name_creator: (
+                AbstractDataPlatformTableCreator
+            ) = supported_resolver.get_table_full_name_creator()(
+                ctx=ctx,
+                config=config,
+                platform_instance_resolver=platform_instance_resolver,
             )
 
-            for table_full_name in table_full_name_creator.get_full_table_names(
-                f_detail
-            ):
-                data_platform_tables.append(
-                    DataPlatformTable(
-                        name=table_full_name.split(".")[-1],
-                        full_name=table_full_name,
-                        data_platform_pair=table_full_name_creator.get_platform_pair(),
-                    )
-                )
+            lineage.append(table_qualified_name_creator.create_lineage(f_detail))
 
-        return data_platform_tables
+        return lineage
 
 
-class DefaultTwoStepDataAccessSources(AbstractTableFullNameCreator, ABC):
+class DefaultTwoStepDataAccessSources(AbstractDataPlatformTableCreator, ABC):
     """
     These are the DataSource for which PowerBI Desktop generates default M-Query of following pattern
         let
@@ -380,24 +564,16 @@ class DefaultTwoStepDataAccessSources(AbstractTableFullNameCreator, ABC):
 
     def two_level_access_pattern(
         self, data_access_func_detail: DataAccessFunctionDetail
-    ) -> List[str]:
-        full_table_names: List[str] = []
-
+    ) -> Lineage:
         logger.debug(
-            f"Processing PostgreSQL data-access function detail {data_access_func_detail}"
-        )
-        arguments: List[str] = tree_function.strip_char_from_list(
-            values=tree_function.remove_whitespaces_from_list(
-                tree_function.token_values(data_access_func_detail.arg_list)
-            ),
-            char='"',
+            f"Processing {self.get_platform_pair().powerbi_data_platform_name} data-access function detail {data_access_func_detail}"
         )
 
-        if len(arguments) != 2:
-            logger.debug(f"Expected 2 arguments, but got {len(arguments)}")
-            return full_table_names
-
-        db_name: str = arguments[1]
+        server, db_name = self.get_db_detail_from_argument(
+            data_access_func_detail.arg_list
+        )
+        if server is None or db_name is None:
+            return Lineage.empty()  # Return empty list
 
         schema_name: str = cast(
             IdentifierAccessor, data_access_func_detail.identifier_accessor
@@ -407,38 +583,99 @@ class DefaultTwoStepDataAccessSources(AbstractTableFullNameCreator, ABC):
             IdentifierAccessor, data_access_func_detail.identifier_accessor
         ).items["Item"]
 
-        full_table_names.append(f"{db_name}.{schema_name}.{table_name}")
+        qualified_table_name: str = f"{db_name}.{schema_name}.{table_name}"
 
         logger.debug(
-            f"Platform({self.get_platform_pair().datahub_data_platform_name}) full-table-names = {full_table_names}"
+            f"Platform({self.get_platform_pair().datahub_data_platform_name}) qualified_table_name= {qualified_table_name}"
         )
 
-        return full_table_names
+        urn = urn_creator(
+            config=self.config,
+            platform_instance_resolver=self.platform_instance_resolver,
+            data_platform_pair=self.get_platform_pair(),
+            server=server,
+            qualified_table_name=qualified_table_name,
+        )
+        return Lineage(
+            upstreams=[
+                DataPlatformTable(
+                    data_platform_pair=self.get_platform_pair(),
+                    urn=urn,
+                )
+            ],
+            column_lineage=[],
+        )
 
 
-class PostgresTableFullNameCreator(DefaultTwoStepDataAccessSources):
-    def get_full_table_names(
+class PostgresDataPlatformTableCreator(DefaultTwoStepDataAccessSources):
+    def create_lineage(
         self, data_access_func_detail: DataAccessFunctionDetail
-    ) -> List[str]:
+    ) -> Lineage:
         return self.two_level_access_pattern(data_access_func_detail)
 
     def get_platform_pair(self) -> DataPlatformPair:
         return SupportedDataPlatform.POSTGRES_SQL.value
 
 
-class MSSqlTableFullNameCreator(DefaultTwoStepDataAccessSources):
+class MSSqlDataPlatformTableCreator(DefaultTwoStepDataAccessSources):
+    # https://learn.microsoft.com/en-us/sql/relational-databases/security/authentication-access/ownership-and-user-schema-separation?view=sql-server-ver16
+    DEFAULT_SCHEMA = "dbo"  # Default schema name in MS-SQL is dbo
+
     def get_platform_pair(self) -> DataPlatformPair:
         return SupportedDataPlatform.MS_SQL.value
 
-    def get_full_table_names(
+    def create_urn_using_old_parser(
+        self, query: str, db_name: str, server: str
+    ) -> List[DataPlatformTable]:
+        dataplatform_tables: List[DataPlatformTable] = []
+
+        tables: List[str] = native_sql_parser.get_tables(query)
+
+        for parsed_table in tables:
+            # components: List[str] = [v.strip("[]") for v in parsed_table.split(".")]
+            components = [v.strip("[]") for v in parsed_table.split(".")]
+            if len(components) == 3:
+                database, schema, table = components
+            elif len(components) == 2:
+                schema, table = components
+                database = db_name
+            elif len(components) == 1:
+                (table,) = components
+                database = db_name
+                schema = MSSqlDataPlatformTableCreator.DEFAULT_SCHEMA
+            else:
+                logger.warning(
+                    f"Unsupported table format found {parsed_table} in query {query}"
+                )
+                continue
+
+            qualified_table_name = f"{database}.{schema}.{table}"
+            urn = urn_creator(
+                config=self.config,
+                platform_instance_resolver=self.platform_instance_resolver,
+                data_platform_pair=self.get_platform_pair(),
+                server=server,
+                qualified_table_name=qualified_table_name,
+            )
+            dataplatform_tables.append(
+                DataPlatformTable(
+                    data_platform_pair=self.get_platform_pair(),
+                    urn=urn,
+                )
+            )
+
+        logger.debug(f"Generated upstream tables = {dataplatform_tables}")
+
+        return dataplatform_tables
+
+    def create_lineage(
         self, data_access_func_detail: DataAccessFunctionDetail
-    ) -> List[str]:
-        full_table_names: List[str] = []
+    ) -> Lineage:
+
         arguments: List[str] = tree_function.strip_char_from_list(
             values=tree_function.remove_whitespaces_from_list(
                 tree_function.token_values(data_access_func_detail.arg_list)
             ),
-            char='"',
         )
 
         if len(arguments) == 2:
@@ -448,46 +685,49 @@ class MSSqlTableFullNameCreator(DefaultTwoStepDataAccessSources):
 
         if len(arguments) >= 4 and arguments[2] != "Query":
             logger.debug("Unsupported case is found. Second index is not the Query")
-            return full_table_names
+            return Lineage.empty()
 
-        db_name: str = arguments[1]
-        tables: List[str] = native_sql_parser.get_tables(arguments[3])
-        for table in tables:
-            schema_and_table: List[str] = table.split(".")
-            if len(schema_and_table) == 1:
-                # schema name is not present. Default schema name in MS-SQL is dbo
-                # https://learn.microsoft.com/en-us/sql/relational-databases/security/authentication-access/ownership-and-user-schema-separation?view=sql-server-ver16
-                schema_and_table.insert(0, "dbo")
-
-            full_table_names.append(
-                f"{db_name}.{schema_and_table[0]}.{schema_and_table[1]}"
+        if self.config.enable_advance_lineage_sql_construct is False:
+            # Use previous parser to generate URN to keep backward compatibility
+            return Lineage(
+                upstreams=self.create_urn_using_old_parser(
+                    query=arguments[3],
+                    db_name=arguments[1],
+                    server=arguments[0],
+                ),
+                column_lineage=[],
             )
 
-        logger.debug("MS-SQL full-table-names %s", full_table_names)
+        return self.parse_custom_sql(
+            query=arguments[3],
+            database=arguments[1],
+            server=arguments[0],
+            schema=MSSqlDataPlatformTableCreator.DEFAULT_SCHEMA,
+        )
 
-        return full_table_names
 
-
-class OracleTableFullNameCreator(AbstractTableFullNameCreator):
+class OracleDataPlatformTableCreator(AbstractDataPlatformTableCreator):
     def get_platform_pair(self) -> DataPlatformPair:
         return SupportedDataPlatform.ORACLE.value
 
-    def _get_db_name(self, value: str) -> Optional[str]:
-        error_message: str = f"The target argument ({value}) should in the format of <host-name>:<port>/<db-name>[.<domain>]"
+    @staticmethod
+    def _get_server_and_db_name(value: str) -> Tuple[Optional[str], Optional[str]]:
+        error_message: str = (
+            f"The target argument ({value}) should in the format of <host-name>:<port>/<db-name>["
+            ".<domain>]"
+        )
         splitter_result: List[str] = value.split("/")
         if len(splitter_result) != 2:
             logger.debug(error_message)
-            return None
+            return None, None
 
         db_name = splitter_result[1].split(".")[0]
 
-        return db_name
+        return tree_function.strip_char_from_list([splitter_result[0]])[0], db_name
 
-    def get_full_table_names(
+    def create_lineage(
         self, data_access_func_detail: DataAccessFunctionDetail
-    ) -> List[str]:
-        full_table_names: List[str] = []
-
+    ) -> Lineage:
         logger.debug(
             f"Processing Oracle data-access function detail {data_access_func_detail}"
         )
@@ -496,9 +736,10 @@ class OracleTableFullNameCreator(AbstractTableFullNameCreator):
             tree_function.token_values(data_access_func_detail.arg_list)
         )
 
-        db_name: Optional[str] = self._get_db_name(arguments[0])
-        if db_name is None:
-            return full_table_names
+        server, db_name = self._get_server_and_db_name(arguments[0])
+
+        if db_name is None or server is None:
+            return Lineage.empty()
 
         schema_name: str = cast(
             IdentifierAccessor, data_access_func_detail.identifier_accessor
@@ -509,20 +750,158 @@ class OracleTableFullNameCreator(AbstractTableFullNameCreator):
             cast(IdentifierAccessor, data_access_func_detail.identifier_accessor).next,
         ).items["Name"]
 
-        full_table_names.append(f"{db_name}.{schema_name}.{table_name}")
+        qualified_table_name: str = f"{db_name}.{schema_name}.{table_name}"
 
-        return full_table_names
+        urn = urn_creator(
+            config=self.config,
+            platform_instance_resolver=self.platform_instance_resolver,
+            data_platform_pair=self.get_platform_pair(),
+            server=server,
+            qualified_table_name=qualified_table_name,
+        )
+
+        return Lineage(
+            upstreams=[
+                DataPlatformTable(
+                    data_platform_pair=self.get_platform_pair(),
+                    urn=urn,
+                )
+            ],
+            column_lineage=[],
+        )
 
 
-class SnowflakeTableFullNameCreator(AbstractTableFullNameCreator):
-    def get_platform_pair(self) -> DataPlatformPair:
-        return SupportedDataPlatform.SNOWFLAKE.value
+class DatabrickDataPlatformTableCreator(AbstractDataPlatformTableCreator):
+    def form_qualified_table_name(
+        self,
+        value_dict: Dict[Any, Any],
+        catalog_name: str,
+        data_platform_pair: DataPlatformPair,
+        server: str,
+    ) -> str:
+        # database and catalog names are same in M-Query
+        db_name: str = (
+            catalog_name if "Database" not in value_dict else value_dict["Database"]
+        )
 
-    def get_full_table_names(
+        schema_name: str = value_dict["Schema"]
+
+        table_name: str = value_dict["Table"]
+
+        platform_detail: PlatformDetail = (
+            self.platform_instance_resolver.get_platform_instance(
+                PowerBIPlatformDetail(
+                    data_platform_pair=data_platform_pair,
+                    data_platform_server=server,
+                )
+            )
+        )
+
+        metastore: Optional[str] = None
+
+        qualified_table_name: str = f"{db_name}.{schema_name}.{table_name}"
+
+        if isinstance(platform_detail, DataBricksPlatformDetail):
+            metastore = platform_detail.metastore
+
+        if metastore is not None:
+            return f"{metastore}.{qualified_table_name}"
+
+        return qualified_table_name
+
+    def create_lineage(
         self, data_access_func_detail: DataAccessFunctionDetail
-    ) -> List[str]:
+    ) -> Lineage:
+        logger.debug(
+            f"Processing Databrick data-access function detail {data_access_func_detail}"
+        )
+        value_dict: Dict[str, str] = {}
+        temp_accessor: Optional[
+            Union[IdentifierAccessor, AbstractIdentifierAccessor]
+        ] = data_access_func_detail.identifier_accessor
 
-        logger.debug(f"Processing Snowflake function detail {data_access_func_detail}")
+        while temp_accessor:
+            if isinstance(temp_accessor, IdentifierAccessor):
+                # Condition to handle databricks M-query pattern where table, schema and database all are present in
+                # same invoke statement
+                if all(
+                    element in temp_accessor.items
+                    for element in ["Item", "Schema", "Catalog"]
+                ):
+                    value_dict["Schema"] = temp_accessor.items["Schema"]
+                    value_dict["Table"] = temp_accessor.items["Item"]
+                else:
+                    value_dict[temp_accessor.items["Kind"]] = temp_accessor.items[
+                        "Name"
+                    ]
+
+                if temp_accessor.next is not None:
+                    temp_accessor = temp_accessor.next
+                else:
+                    break
+            else:
+                logger.debug(
+                    "expecting instance to be IdentifierAccessor, please check if parsing is done properly"
+                )
+                return Lineage.empty()
+
+        arguments = self.get_tokens(data_access_func_detail.arg_list)
+        if len(arguments) < 4:
+            logger.info(
+                f"Databricks workspace and catalog information in arguments({arguments}). "
+                f"Skipping upstream table"
+            )
+            return Lineage.empty()
+
+        workspace_fqdn: str = arguments[0]
+
+        catalog_name: str = arguments[3]
+
+        qualified_table_name: str = self.form_qualified_table_name(
+            value_dict=value_dict,
+            catalog_name=catalog_name,
+            data_platform_pair=self.get_platform_pair(),
+            server=workspace_fqdn,
+        )
+
+        urn = urn_creator(
+            config=self.config,
+            platform_instance_resolver=self.platform_instance_resolver,
+            data_platform_pair=self.get_platform_pair(),
+            server=workspace_fqdn,
+            qualified_table_name=qualified_table_name,
+        )
+
+        return Lineage(
+            upstreams=[
+                DataPlatformTable(
+                    data_platform_pair=self.get_platform_pair(),
+                    urn=urn,
+                )
+            ],
+            column_lineage=[],
+        )
+
+    def get_platform_pair(self) -> DataPlatformPair:
+        return SupportedDataPlatform.DATABRICK_SQL.value
+
+
+class DefaultThreeStepDataAccessSources(AbstractDataPlatformTableCreator, ABC):
+    def get_datasource_server(
+        self, arguments: List[str], data_access_func_detail: DataAccessFunctionDetail
+    ) -> str:
+        return tree_function.strip_char_from_list([arguments[0]])[0]
+
+    def create_lineage(
+        self, data_access_func_detail: DataAccessFunctionDetail
+    ) -> Lineage:
+        logger.debug(
+            f"Processing {self.get_platform_pair().datahub_data_platform_name} function detail {data_access_func_detail}"
+        )
+
+        arguments: List[str] = tree_function.remove_whitespaces_from_list(
+            tree_function.token_values(data_access_func_detail.arg_list)
+        )
         # First is database name
         db_name: str = data_access_func_detail.identifier_accessor.items["Name"]  # type: ignore
         # Second is schema name
@@ -534,21 +913,155 @@ class SnowflakeTableFullNameCreator(AbstractTableFullNameCreator):
             IdentifierAccessor, data_access_func_detail.identifier_accessor.next.next  # type: ignore
         ).items["Name"]
 
-        full_table_name: str = f"{db_name}.{schema_name}.{table_name}"
+        qualified_table_name: str = f"{db_name}.{schema_name}.{table_name}"
 
-        logger.debug(f"Snowflake full-table-name {full_table_name}")
+        logger.debug(
+            f"{self.get_platform_pair().datahub_data_platform_name} qualified_table_name {qualified_table_name}"
+        )
 
-        return [full_table_name]
+        server: str = self.get_datasource_server(arguments, data_access_func_detail)
+
+        urn = urn_creator(
+            config=self.config,
+            platform_instance_resolver=self.platform_instance_resolver,
+            data_platform_pair=self.get_platform_pair(),
+            server=server,
+            qualified_table_name=qualified_table_name,
+        )
+
+        return Lineage(
+            upstreams=[
+                DataPlatformTable(
+                    data_platform_pair=self.get_platform_pair(),
+                    urn=urn,
+                )
+            ],
+            column_lineage=[],
+        )
 
 
-class NativeQueryTableFullNameCreator(AbstractTableFullNameCreator):
+class SnowflakeDataPlatformTableCreator(DefaultThreeStepDataAccessSources):
     def get_platform_pair(self) -> DataPlatformPair:
         return SupportedDataPlatform.SNOWFLAKE.value
 
-    def get_full_table_names(
+
+class GoogleBigQueryDataPlatformTableCreator(DefaultThreeStepDataAccessSources):
+    def get_platform_pair(self) -> DataPlatformPair:
+        return SupportedDataPlatform.GOOGLE_BIGQUERY.value
+
+    def get_datasource_server(
+        self, arguments: List[str], data_access_func_detail: DataAccessFunctionDetail
+    ) -> str:
+        # In Google BigQuery server is project-name
+        # condition to silent lint, it is not going to be None
+        return (
+            data_access_func_detail.identifier_accessor.items["Name"]
+            if data_access_func_detail.identifier_accessor is not None
+            else ""
+        )
+
+
+class AmazonRedshiftDataPlatformTableCreator(AbstractDataPlatformTableCreator):
+    def get_platform_pair(self) -> DataPlatformPair:
+        return SupportedDataPlatform.AMAZON_REDSHIFT.value
+
+    def create_lineage(
         self, data_access_func_detail: DataAccessFunctionDetail
-    ) -> List[str]:
-        full_table_names: List[str] = []
+    ) -> Lineage:
+        logger.debug(
+            f"Processing AmazonRedshift data-access function detail {data_access_func_detail}"
+        )
+
+        server, db_name = self.get_db_detail_from_argument(
+            data_access_func_detail.arg_list
+        )
+        if db_name is None or server is None:
+            return Lineage.empty()  # Return empty list
+
+        schema_name: str = cast(
+            IdentifierAccessor, data_access_func_detail.identifier_accessor
+        ).items["Name"]
+
+        table_name: str = cast(
+            IdentifierAccessor,
+            cast(IdentifierAccessor, data_access_func_detail.identifier_accessor).next,
+        ).items["Name"]
+
+        qualified_table_name: str = f"{db_name}.{schema_name}.{table_name}"
+
+        urn = urn_creator(
+            config=self.config,
+            platform_instance_resolver=self.platform_instance_resolver,
+            data_platform_pair=self.get_platform_pair(),
+            server=server,
+            qualified_table_name=qualified_table_name,
+        )
+
+        return Lineage(
+            upstreams=[
+                DataPlatformTable(
+                    data_platform_pair=self.get_platform_pair(),
+                    urn=urn,
+                )
+            ],
+            column_lineage=[],
+        )
+
+
+class NativeQueryDataPlatformTableCreator(AbstractDataPlatformTableCreator):
+    SUPPORTED_NATIVE_QUERY_DATA_PLATFORM: dict = {
+        SupportedDataPlatform.SNOWFLAKE.value.powerbi_data_platform_name: SupportedDataPlatform.SNOWFLAKE,
+        SupportedDataPlatform.AMAZON_REDSHIFT.value.powerbi_data_platform_name: SupportedDataPlatform.AMAZON_REDSHIFT,
+    }
+    current_data_platform: SupportedDataPlatform = SupportedDataPlatform.SNOWFLAKE
+
+    def get_platform_pair(self) -> DataPlatformPair:
+        return self.current_data_platform.value
+
+    @staticmethod
+    def is_native_parsing_supported(data_access_function_name: str) -> bool:
+        return (
+            data_access_function_name
+            in NativeQueryDataPlatformTableCreator.SUPPORTED_NATIVE_QUERY_DATA_PLATFORM
+        )
+
+    def create_urn_using_old_parser(self, query: str, server: str) -> Lineage:
+        dataplatform_tables: List[DataPlatformTable] = []
+
+        tables: List[str] = native_sql_parser.get_tables(query)
+
+        for qualified_table_name in tables:
+            if len(qualified_table_name.split(".")) != 3:
+                logger.debug(
+                    f"Skipping table {qualified_table_name} as it is not as per qualified_table_name format"
+                )
+                continue
+
+            urn = urn_creator(
+                config=self.config,
+                platform_instance_resolver=self.platform_instance_resolver,
+                data_platform_pair=self.get_platform_pair(),
+                server=server,
+                qualified_table_name=qualified_table_name,
+            )
+
+            dataplatform_tables.append(
+                DataPlatformTable(
+                    data_platform_pair=self.get_platform_pair(),
+                    urn=urn,
+                )
+            )
+
+        logger.debug(f"Generated dataplatform_tables {dataplatform_tables}")
+
+        return Lineage(
+            upstreams=dataplatform_tables,
+            column_lineage=[],
+        )
+
+    def create_lineage(
+        self, data_access_func_detail: DataAccessFunctionDetail
+    ) -> Lineage:
         t1: Tree = cast(
             Tree, tree_function.first_arg_list_func(data_access_func_detail.arg_list)
         )
@@ -559,41 +1072,54 @@ class NativeQueryTableFullNameCreator(AbstractTableFullNameCreator):
                 f"Expecting 2 argument, actual argument count is {len(flat_argument_list)}"
             )
             logger.debug(f"Flat argument list = {flat_argument_list}")
-            return full_table_names
-
+            return Lineage.empty()
         data_access_tokens: List[str] = tree_function.remove_whitespaces_from_list(
             tree_function.token_values(flat_argument_list[0])
         )
-        if (
-            data_access_tokens[0]
-            != SupportedDataPlatform.SNOWFLAKE.value.powerbi_data_platform_name
-        ):
+
+        if not self.is_native_parsing_supported(data_access_tokens[0]):
             logger.debug(
-                f"Provided native-query data-platform = {data_access_tokens[0]}"
+                f"Unsupported native-query data-platform = {data_access_tokens[0]}"
             )
-            logger.debug("Only Snowflake is supported in NativeQuery")
-            return full_table_names
+            logger.debug(
+                f"NativeQuery is supported only for {self.SUPPORTED_NATIVE_QUERY_DATA_PLATFORM}"
+            )
+
+        if len(data_access_tokens[0]) < 3:
+            logger.debug(
+                f"Server is not available in argument list for data-platform {data_access_tokens[0]}. Returning empty "
+                "list"
+            )
+            return Lineage.empty()
+
+        self.current_data_platform = self.SUPPORTED_NATIVE_QUERY_DATA_PLATFORM[
+            data_access_tokens[0]
+        ]
 
         # First argument is the query
         sql_query: str = tree_function.strip_char_from_list(
             values=tree_function.remove_whitespaces_from_list(
                 tree_function.token_values(flat_argument_list[1])
             ),
-            char='"',
         )[
             0
         ]  # Remove any whitespaces and double quotes character
 
-        for table in native_sql_parser.get_tables(sql_query):
-            if len(table.split(".")) != 3:
-                logger.debug(
-                    f"Skipping table {table} as it is not as per full_table_name format"
-                )
-                continue
+        server = tree_function.strip_char_from_list([data_access_tokens[2]])[0]
 
-            full_table_names.append(table)
+        if self.config.enable_advance_lineage_sql_construct is False:
+            # Use previous parser to generate URN to keep backward compatibility
+            return self.create_urn_using_old_parser(
+                query=sql_query,
+                server=server,
+            )
 
-        return full_table_names
+        return self.parse_custom_sql(
+            query=sql_query,
+            server=server,
+            database=None,  # database and schema is available inside custom sql as per PowerBI Behavior
+            schema=None,
+        )
 
 
 class FunctionName(Enum):
@@ -602,35 +1128,59 @@ class FunctionName(Enum):
     ORACLE_DATA_ACCESS = "Oracle.Database"
     SNOWFLAKE_DATA_ACCESS = "Snowflake.Databases"
     MSSQL_DATA_ACCESS = "Sql.Database"
+    DATABRICK_DATA_ACCESS = "Databricks.Catalogs"
+    GOOGLE_BIGQUERY_DATA_ACCESS = "GoogleBigQuery.Database"
+    AMAZON_REDSHIFT_DATA_ACCESS = "AmazonRedshift.Database"
+    DATABRICK_MULTI_CLOUD_DATA_ACCESS = "DatabricksMultiCloud.Catalogs"
 
 
 class SupportedResolver(Enum):
+    DATABRICKS_QUERY = (
+        DatabrickDataPlatformTableCreator,
+        FunctionName.DATABRICK_DATA_ACCESS,
+    )
+
+    DATABRICKS_MULTI_CLOUD = (
+        DatabrickDataPlatformTableCreator,
+        FunctionName.DATABRICK_MULTI_CLOUD_DATA_ACCESS,
+    )
+
     POSTGRES_SQL = (
-        PostgresTableFullNameCreator,
+        PostgresDataPlatformTableCreator,
         FunctionName.POSTGRESQL_DATA_ACCESS,
     )
 
     ORACLE = (
-        OracleTableFullNameCreator,
+        OracleDataPlatformTableCreator,
         FunctionName.ORACLE_DATA_ACCESS,
     )
 
     SNOWFLAKE = (
-        SnowflakeTableFullNameCreator,
+        SnowflakeDataPlatformTableCreator,
         FunctionName.SNOWFLAKE_DATA_ACCESS,
     )
 
     MS_SQL = (
-        MSSqlTableFullNameCreator,
+        MSSqlDataPlatformTableCreator,
         FunctionName.MSSQL_DATA_ACCESS,
     )
 
+    GOOGLE_BIG_QUERY = (
+        GoogleBigQueryDataPlatformTableCreator,
+        FunctionName.GOOGLE_BIGQUERY_DATA_ACCESS,
+    )
+
+    AMAZON_REDSHIFT = (
+        AmazonRedshiftDataPlatformTableCreator,
+        FunctionName.AMAZON_REDSHIFT_DATA_ACCESS,
+    )
+
     NATIVE_QUERY = (
-        NativeQueryTableFullNameCreator,
+        NativeQueryDataPlatformTableCreator,
         FunctionName.NATIVE_QUERY,
     )
 
-    def get_table_full_name_creator(self) -> Type[AbstractTableFullNameCreator]:
+    def get_table_full_name_creator(self) -> Type[AbstractDataPlatformTableCreator]:
         return self.value[0]
 
     def get_function_name(self) -> str:

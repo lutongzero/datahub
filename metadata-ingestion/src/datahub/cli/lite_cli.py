@@ -9,7 +9,7 @@ import click
 from click.shell_completion import CompletionItem
 from click_default_group import DefaultGroup
 
-from datahub.cli.cli_utils import (
+from datahub.cli.config_utils import (
     DATAHUB_ROOT_FOLDER,
     DatahubConfig,
     get_client_config,
@@ -40,7 +40,7 @@ class DuckDBLiteConfigWrapper(DuckDBLiteConfig):
 
 class LiteCliConfig(DatahubConfig):
     lite: LiteLocalConfig = LiteLocalConfig(
-        type="duckdb", config=DuckDBLiteConfigWrapper()
+        type="duckdb", config=DuckDBLiteConfigWrapper().dict()
     )
 
 
@@ -321,7 +321,6 @@ def write_lite_config(lite_config: LiteLocalConfig) -> None:
 @click.pass_context
 @telemetry.with_telemetry()
 def init(ctx: click.Context, type: Optional[str], file: Optional[str]) -> None:
-
     lite_config = get_lite_config()
     new_lite_config_dict = lite_config.dict()
     # Update the type and config sections only

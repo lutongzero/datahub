@@ -6,15 +6,18 @@ import { Entity, EntityCapabilityType, IconStyleType, PreviewType } from '../Ent
 import { getDataForEntityType } from '../shared/containers/profile/utils';
 import { EntityProfile } from '../shared/containers/profile/EntityProfile';
 import { GenericEntityProperties } from '../shared/types';
-import { GetMlFeatureQuery, useGetMlFeatureQuery } from '../../../graphql/mlFeature.generated';
+import { useGetMlFeatureQuery } from '../../../graphql/mlFeature.generated';
 import { SidebarAboutSection } from '../shared/containers/profile/sidebar/AboutSection/SidebarAboutSection';
 import { SidebarTagsSection } from '../shared/containers/profile/sidebar/SidebarTagsSection';
-import { SidebarOwnerSection } from '../shared/containers/profile/sidebar/Ownership/SidebarOwnerSection';
+import { SidebarOwnerSection } from '../shared/containers/profile/sidebar/Ownership/sidebar/SidebarOwnerSection';
 import { SidebarDomainSection } from '../shared/containers/profile/sidebar/Domain/SidebarDomainSection';
 import { DocumentationTab } from '../shared/tabs/Documentation/DocumentationTab';
 import { FeatureTableTab } from '../shared/tabs/ML/MlFeatureFeatureTableTab';
 import { LineageTab } from '../shared/tabs/Lineage/LineageTab';
 import { EntityMenuItems } from '../shared/EntityDropdown/EntityDropdown';
+import DataProductSection from '../shared/containers/profile/sidebar/DataProduct/DataProductSection';
+import { getDataProduct } from '../shared/utils';
+import { PropertiesTab } from '../shared/tabs/Properties/PropertiesTab';
 
 /**
  * Definition of the DataHub MLFeature entity.
@@ -55,6 +58,8 @@ export class MLFeatureEntity implements Entity<MlFeature> {
 
     getCollectionName = () => 'Features';
 
+    useEntityQuery = useGetMlFeatureQuery;
+
     getOverridePropertiesFromEntity = (feature?: MlFeature | null): GenericEntityProperties => {
         return {
             // eslint-disable-next-line
@@ -82,42 +87,43 @@ export class MLFeatureEntity implements Entity<MlFeature> {
                 {
                     name: 'Lineage',
                     component: LineageTab,
-                    display: {
-                        visible: (_, _1) => true,
-                        enabled: (_, result: GetMlFeatureQuery) => {
-                            return (
-                                (result?.mlFeature?.upstream?.total || 0) > 0 ||
-                                (result?.mlFeature?.downstream?.total || 0) > 0
-                            );
-                        },
-                    },
+                },
+                {
+                    name: 'Properties',
+                    component: PropertiesTab,
                 },
             ]}
-            sidebarSections={[
-                {
-                    component: SidebarAboutSection,
-                },
-                {
-                    component: SidebarTagsSection,
-                    properties: {
-                        hasTags: true,
-                        hasTerms: true,
-                    },
-                },
-                {
-                    component: SidebarOwnerSection,
-                    properties: {
-                        defaultOwnerType: OwnershipType.TechnicalOwner,
-                    },
-                },
-                {
-                    component: SidebarDomainSection,
-                },
-            ]}
+            sidebarSections={this.getSidebarSections()}
         />
     );
 
+    getSidebarSections = () => [
+        {
+            component: SidebarAboutSection,
+        },
+        {
+            component: SidebarOwnerSection,
+            properties: {
+                defaultOwnerType: OwnershipType.TechnicalOwner,
+            },
+        },
+        {
+            component: SidebarTagsSection,
+            properties: {
+                hasTags: true,
+                hasTerms: true,
+            },
+        },
+        {
+            component: SidebarDomainSection,
+        },
+        {
+            component: DataProductSection,
+        },
+    ];
+
     renderPreview = (_: PreviewType, data: MlFeature) => {
+        const genericProperties = this.getGenericEntityProperties(data);
         // eslint-disable-next-line
         const platform = data?.['featureTables']?.relationships?.[0]?.entity?.platform;
         return (
@@ -128,12 +134,14 @@ export class MLFeatureEntity implements Entity<MlFeature> {
                 description={data.description}
                 owners={data.ownership?.owners}
                 platform={platform}
+                dataProduct={getDataProduct(genericProperties?.dataProduct)}
             />
         );
     };
 
     renderSearch = (result: SearchResult) => {
         const data = result.entity as MlFeature;
+        const genericProperties = this.getGenericEntityProperties(data);
         // eslint-disable-next-line
         const platform = data?.['featureTables']?.relationships?.[0]?.entity?.platform;
         return (
@@ -143,8 +151,11 @@ export class MLFeatureEntity implements Entity<MlFeature> {
                 featureNamespace={data.featureNamespace || ''}
                 description={data.description || ''}
                 owners={data.ownership?.owners}
+                dataProduct={getDataProduct(genericProperties?.dataProduct)}
                 platform={platform}
                 platformInstanceId={data.dataPlatformInstance?.instanceId}
+                degree={(result as any).degree}
+                paths={(result as any).paths}
             />
         );
     };
@@ -181,6 +192,7 @@ export class MLFeatureEntity implements Entity<MlFeature> {
             EntityCapabilityType.DOMAINS,
             EntityCapabilityType.DEPRECATION,
             EntityCapabilityType.SOFT_DELETE,
+            EntityCapabilityType.DATA_PRODUCTS,
         ]);
     };
 }

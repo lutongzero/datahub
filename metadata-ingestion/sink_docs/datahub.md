@@ -28,6 +28,17 @@ sink:
     server: "http://localhost:8080"
 ```
 
+If you are connecting to a hosted Acryl instance, your sink will look like
+```yml
+source:
+  # source configs
+sink:
+  type: "datahub-rest"
+  config:
+    server: "https://<your-instance>.acryl.io/gms"
+    token: <token>
+```
+
 If you are running the ingestion in a container in docker and your [GMS is also running in docker](../../docker/README.md) then you should use the internal docker hostname of the GMS pod. Usually it would look something like
 
 ```yml
@@ -64,8 +75,9 @@ Note that a `.` is used to denote nested fields in the YAML recipe.
 | `retry_status_codes`       |          | [429, 502, 503, 504] | Retry HTTP request also on these status codes                                                      |
 | `token`                    |          |                      | Bearer token used for authentication.                                                              |
 | `extra_headers`            |          |                      | Extra headers which will be added to the request.                                                  |
-| `max_threads`              |          | `1`                  | Experimental: Max parallelism for REST API calls                                                   |
-| `ca_certificate_path`      |          |                      | Path to CA certificate for HTTPS communications                                                    |
+| `max_threads`              |          | `15`                 | Experimental: Max parallelism for REST API calls                                                   |
+| `ca_certificate_path`      |          |                      | Path to server's CA certificate for verification of HTTPS communications                                                    |
+| `client_certificate_path`      |          |                      | Path to client's CA certificate for HTTPS communications                                                    |
 | `disable_ssl_verification` |          | false                | Disable ssl certificate validation                                                                 |
 
 ## DataHub Kafka
@@ -178,7 +190,3 @@ Note that a `.` is used to denote nested fields in the YAML recipe.
 | `file`                   |       |   `"~/.datahub/lite/datahub.duckdb"`     | File to use for DuckDB storage |
 | `options`                |          | `{}`                   | Options dictionary to pass through to DuckDB library. See [the official spec](https://duckdb.org/docs/sql/configuration.html) for the options supported by DuckDB. |
 
-
-## Questions
-
-If you've got any questions on configuring this sink, feel free to ping us on [our Slack](https://slack.datahubproject.io/)!

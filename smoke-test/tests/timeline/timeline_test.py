@@ -1,18 +1,17 @@
 import json
-from time import sleep
 
-from datahub.cli import delete_cli
+import pytest
 from datahub.cli import timeline_cli
 from datahub.cli.cli_utils import guess_entity_type, post_entity
-from tests.utils import ingest_file_via_rest
-from requests_wrapper import ELASTICSEARCH_REFRESH_INTERVAL_SECONDS
+
+from tests.utils import get_datahub_graph, ingest_file_via_rest, wait_for_writes_to_sync
+
+pytestmark = pytest.mark.no_cypress_suite1
 
 
 def test_all():
     platform = "urn:li:dataPlatform:kafka"
-    dataset_name = (
-        "test-timeline-sample-kafka"
-    )
+    dataset_name = "test-timeline-sample-kafka"
     env = "PROD"
     dataset_urn = f"urn:li:dataset:({platform},{dataset_name},{env})"
 
@@ -20,9 +19,14 @@ def test_all():
     ingest_file_via_rest("tests/timeline/timeline_test_datav2.json")
     ingest_file_via_rest("tests/timeline/timeline_test_datav3.json")
 
-    res_data = timeline_cli.get_timeline(dataset_urn, ["TAG", "DOCUMENTATION", "TECHNICAL_SCHEMA", "GLOSSARY_TERM",
-                                                       "OWNER"], None, None, False)
-    delete_cli.delete_one_urn_cmd(urn=dataset_urn)
+    res_data = timeline_cli.get_timeline(
+        dataset_urn,
+        ["TAG", "DOCUMENTATION", "TECHNICAL_SCHEMA", "GLOSSARY_TERM", "OWNER"],
+        None,
+        None,
+        False,
+    )
+    get_datahub_graph().hard_delete_entity(urn=dataset_urn)
 
     assert res_data
     assert len(res_data) == 3
@@ -37,9 +41,7 @@ def test_all():
 
 def test_schema():
     platform = "urn:li:dataPlatform:kafka"
-    dataset_name = (
-        "test-timeline-sample-kafka"
-    )
+    dataset_name = "test-timeline-sample-kafka"
     env = "PROD"
     dataset_urn = f"urn:li:dataset:({platform},{dataset_name},{env})"
 
@@ -47,9 +49,11 @@ def test_schema():
     put(dataset_urn, "schemaMetadata", "test_resources/timeline/newschemav2.json")
     put(dataset_urn, "schemaMetadata", "test_resources/timeline/newschemav3.json")
 
-    res_data = timeline_cli.get_timeline(dataset_urn, ["TECHNICAL_SCHEMA"], None, None, False)
+    res_data = timeline_cli.get_timeline(
+        dataset_urn, ["TECHNICAL_SCHEMA"], None, None, False
+    )
 
-    delete_cli.delete_one_urn_cmd(urn=dataset_urn)
+    get_datahub_graph().hard_delete_entity(urn=dataset_urn)
     assert res_data
     assert len(res_data) == 3
     assert res_data[0]["semVerChange"] == "MINOR"
@@ -63,9 +67,7 @@ def test_schema():
 
 def test_glossary():
     platform = "urn:li:dataPlatform:kafka"
-    dataset_name = (
-        "test-timeline-sample-kafka"
-    )
+    dataset_name = "test-timeline-sample-kafka"
     env = "PROD"
     dataset_urn = f"urn:li:dataset:({platform},{dataset_name},{env})"
 
@@ -73,9 +75,11 @@ def test_glossary():
     put(dataset_urn, "glossaryTerms", "test_resources/timeline/newglossaryv2.json")
     put(dataset_urn, "glossaryTerms", "test_resources/timeline/newglossaryv3.json")
 
-    res_data = timeline_cli.get_timeline(dataset_urn, ["GLOSSARY_TERM"], None, None, False)
+    res_data = timeline_cli.get_timeline(
+        dataset_urn, ["GLOSSARY_TERM"], None, None, False
+    )
 
-    delete_cli.delete_one_urn_cmd(urn=dataset_urn)
+    get_datahub_graph().hard_delete_entity(urn=dataset_urn)
     assert res_data
     assert len(res_data) == 3
     assert res_data[0]["semVerChange"] == "MINOR"
@@ -89,19 +93,31 @@ def test_glossary():
 
 def test_documentation():
     platform = "urn:li:dataPlatform:kafka"
-    dataset_name = (
-        "test-timeline-sample-kafka"
-    )
+    dataset_name = "test-timeline-sample-kafka"
     env = "PROD"
     dataset_urn = f"urn:li:dataset:({platform},{dataset_name},{env})"
 
-    put(dataset_urn, "institutionalMemory", "test_resources/timeline/newdocumentation.json")
-    put(dataset_urn, "institutionalMemory", "test_resources/timeline/newdocumentationv2.json")
-    put(dataset_urn, "institutionalMemory", "test_resources/timeline/newdocumentationv3.json")
+    put(
+        dataset_urn,
+        "institutionalMemory",
+        "test_resources/timeline/newdocumentation.json",
+    )
+    put(
+        dataset_urn,
+        "institutionalMemory",
+        "test_resources/timeline/newdocumentationv2.json",
+    )
+    put(
+        dataset_urn,
+        "institutionalMemory",
+        "test_resources/timeline/newdocumentationv3.json",
+    )
 
-    res_data = timeline_cli.get_timeline(dataset_urn, ["DOCUMENTATION"], None, None, False)
+    res_data = timeline_cli.get_timeline(
+        dataset_urn, ["DOCUMENTATION"], None, None, False
+    )
 
-    delete_cli.delete_one_urn_cmd(urn=dataset_urn)
+    get_datahub_graph().hard_delete_entity(urn=dataset_urn)
     assert res_data
     assert len(res_data) == 3
     assert res_data[0]["semVerChange"] == "MINOR"
@@ -115,9 +131,7 @@ def test_documentation():
 
 def test_tags():
     platform = "urn:li:dataPlatform:kafka"
-    dataset_name = (
-        "test-timeline-sample-kafka"
-    )
+    dataset_name = "test-timeline-sample-kafka"
     env = "PROD"
     dataset_urn = f"urn:li:dataset:({platform},{dataset_name},{env})"
 
@@ -127,7 +141,7 @@ def test_tags():
 
     res_data = timeline_cli.get_timeline(dataset_urn, ["TAG"], None, None, False)
 
-    delete_cli.delete_one_urn_cmd(urn=dataset_urn)
+    get_datahub_graph().hard_delete_entity(urn=dataset_urn)
     assert res_data
     assert len(res_data) == 3
     assert res_data[0]["semVerChange"] == "MINOR"
@@ -141,9 +155,7 @@ def test_tags():
 
 def test_ownership():
     platform = "urn:li:dataPlatform:kafka"
-    dataset_name = (
-        "test-timeline-sample-kafka"
-    )
+    dataset_name = "test-timeline-sample-kafka"
     env = "PROD"
     dataset_urn = f"urn:li:dataset:({platform},{dataset_name},{env})"
 
@@ -153,7 +165,7 @@ def test_ownership():
 
     res_data = timeline_cli.get_timeline(dataset_urn, ["OWNER"], None, None, False)
 
-    delete_cli.delete_one_urn_cmd(urn=dataset_urn)
+    get_datahub_graph().hard_delete_entity(urn=dataset_urn)
     assert res_data
     assert len(res_data) == 3
     assert res_data[0]["semVerChange"] == "MINOR"
@@ -171,10 +183,10 @@ def put(urn: str, aspect: str, aspect_data: str) -> None:
     entity_type = guess_entity_type(urn)
     with open(aspect_data) as fp:
         aspect_obj = json.load(fp)
-        status = post_entity(
+        post_entity(
             urn=urn,
             aspect_name=aspect,
             entity_type=entity_type,
             aspect_value=aspect_obj,
         )
-        sleep(ELASTICSEARCH_REFRESH_INTERVAL_SECONDS)
+        wait_for_writes_to_sync()

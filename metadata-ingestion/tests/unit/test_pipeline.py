@@ -1,3 +1,4 @@
+import pathlib
 from typing import Iterable, List, cast
 from unittest.mock import patch
 
@@ -6,11 +7,12 @@ from freezegun import freeze_time
 
 from datahub.configuration.common import DynamicTypedConfig
 from datahub.ingestion.api.committable import CommitPolicy, Committable
-from datahub.ingestion.api.common import RecordEnvelope, WorkUnit
+from datahub.ingestion.api.common import RecordEnvelope
 from datahub.ingestion.api.source import Source, SourceReport
 from datahub.ingestion.api.transform import Transformer
 from datahub.ingestion.api.workunit import MetadataWorkUnit
 from datahub.ingestion.run.pipeline import Pipeline, PipelineContext
+from datahub.ingestion.sink.datahub_rest import DatahubRestSink
 from datahub.metadata.com.linkedin.pegasus2avro.mxe import SystemMetadata
 from datahub.metadata.schema_classes import (
     DatasetPropertiesClass,
@@ -18,12 +20,17 @@ from datahub.metadata.schema_classes import (
     MetadataChangeEventClass,
     StatusClass,
 )
+from tests.test_helpers.click_helpers import run_datahub_cmd
 from tests.test_helpers.sink_helpers import RecordingSinkReport
 
 FROZEN_TIME = "2020-04-14 07:00:00"
 
+# TODO: It seems like one of these tests writes to ~/.datahubenv or otherwise sets
+# some global config, which impacts other tests.
+pytestmark = pytest.mark.random_order(disabled=True)
 
-class TestPipeline(object):
+
+class TestPipeline:
     @patch("datahub.ingestion.source.kafka.KafkaSource.get_workunits", autospec=True)
     @patch("datahub.ingestion.sink.console.ConsoleSink.close", autospec=True)
     @freeze_time(FROZEN_TIME)
@@ -57,17 +64,14 @@ class TestPipeline(object):
             {
                 "source": {
                     "type": "file",
-                    "config": {"filename": "test_file.json"},
+                    "config": {"path": "test_file.json"},
                 },
             }
         )
-        # assert that the default sink config is for a DatahubRestSink
-        assert isinstance(pipeline.config.sink, DynamicTypedConfig)
-        assert pipeline.config.sink.type == "datahub-rest"
-        assert pipeline.config.sink.config == {
-            "server": "http://localhost:8080",
-            "token": None,
-        }
+        # assert that the default sink is a DatahubRestSink
+        assert isinstance(pipeline.sink, DatahubRestSink)
+        assert pipeline.sink.config.server == "http://localhost:8080"
+        # token value is read from ~/.datahubenv which may be None or not
 
     @freeze_time(FROZEN_TIME)
     @patch(
@@ -85,7 +89,7 @@ class TestPipeline(object):
             {
                 "source": {
                     "type": "file",
-                    "config": {"filename": "test_events.json"},
+                    "config": {"path": "test_events.json"},
                 },
                 "sink": {
                     "type": "datahub-rest",
@@ -123,7 +127,7 @@ class TestPipeline(object):
             {
                 "source": {
                     "type": "file",
-                    "config": {"filename": "test_events.json"},
+                    "config": {"path": "test_events.json"},
                 },
                 "sink": {
                     "type": "datahub-rest",
@@ -207,13 +211,64 @@ class TestPipeline(object):
                 "transformers": [
                     {
                         "type": "simple_add_dataset_ownership",
-                        "config": {"owner_urns": ["urn:li:corpuser:foo"]},
+                        "config": {
+                            "owner_urns": ["urn:li:corpuser:foo"],
+                            "ownership_type": "urn:li:ownershipType:__system__technical_owner",
+                        },
                     }
                 ],
                 "sink": {"type": "tests.test_helpers.sink_helpers.RecordingSink"},
             }
         )
         assert pipeline
+
+    @pytest.mark.parametrize(
+        "source,strict_warnings,exit_code",
+        [
+            pytest.param(
+                "FakeSource",
+                False,
+                0,
+            ),
+            pytest.param(
+                "FakeSourceWithWarnings",
+                False,
+                0,
+            ),
+            pytest.param(
+                "FakeSourceWithWarnings",
+                True,
+                1,
+            ),
+        ],
+    )
+    @freeze_time(FROZEN_TIME)
+    def test_pipeline_return_code(self, tmp_path, source, strict_warnings, exit_code):
+        config_file: pathlib.Path = tmp_path / "test.yml"
+
+        config_file.write_text(
+            f"""
+---
+run_id: pipeline_test
+source:
+    type: tests.unit.test_pipeline.{source}
+    config: {{}}
+sink:
+    type: console
+"""
+        )
+
+        res = run_datahub_cmd(
+            [
+                "ingest",
+                "-c",
+                f"{config_file}",
+                *(("--strict-warnings",) if strict_warnings else ()),
+            ],
+            tmp_path=tmp_path,
+            check_result=False,
+        )
+        assert res.exit_code == exit_code, res.stdout
 
     @pytest.mark.parametrize(
         "commit_policy,source,should_commit",
@@ -327,7 +382,8 @@ class AddStatusRemovedTransformer(Transformer):
 
 
 class FakeSource(Source):
-    def __init__(self):
+    def __init__(self, ctx: PipelineContext):
+        super().__init__(ctx)
         self.source_report = SourceReport()
         self.work_units: List[MetadataWorkUnit] = [
             MetadataWorkUnit(id="workunit-1", mce=get_initial_mce())
@@ -336,9 +392,9 @@ class FakeSource(Source):
     @classmethod
     def create(cls, config_dict: dict, ctx: PipelineContext) -> "Source":
         assert not config_dict
-        return cls()
+        return cls(ctx)
 
-    def get_workunits(self) -> Iterable[WorkUnit]:
+    def get_workunits(self) -> Iterable[MetadataWorkUnit]:
         return self.work_units
 
     def get_report(self) -> SourceReport:
@@ -349,8 +405,8 @@ class FakeSource(Source):
 
 
 class FakeSourceWithWarnings(FakeSource):
-    def __init__(self):
-        super().__init__()
+    def __init__(self, ctx: PipelineContext):
+        super().__init__(ctx)
         self.source_report.report_warning("test_warning", "warning_text")
 
     def get_report(self) -> SourceReport:
@@ -358,8 +414,8 @@ class FakeSourceWithWarnings(FakeSource):
 
 
 class FakeSourceWithFailures(FakeSource):
-    def __init__(self):
-        super().__init__()
+    def __init__(self, ctx: PipelineContext):
+        super().__init__(ctx)
         self.source_report.report_failure("test_failure", "failure_text")
 
     def get_report(self) -> SourceReport:

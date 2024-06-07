@@ -1,11 +1,13 @@
 import logging
 import math
 from abc import ABC, abstractmethod
+from datetime import datetime, timedelta
 from time import sleep
-from typing import Any, List, Optional
+from typing import Any, Dict, List, Optional
 
 import msal
 import requests
+from requests import Response
 from requests.adapters import HTTPAdapter
 from urllib3 import Retry
 
@@ -33,6 +35,17 @@ def is_permission_error(e: Exception) -> bool:
     return e.response.status_code == 401 or e.response.status_code == 403
 
 
+def is_http_failure(response: Response, message: str) -> bool:
+    if response.ok:
+        # It is not failure so no need to log the message just return with False
+        return False
+
+    logger.info(message)
+    logger.debug(f"HTTP Status Code = {response.status_code}")
+    logger.debug(f"HTTP Error Message = {response.text}")
+    return True
+
+
 class DataResolverBase(ABC):
     SCOPE: str = "https://analysis.windows.net/powerbi/api/.default"
     BASE_URL: str = "https://api.powerbi.com/v1.0/myorg/groups"
@@ -47,9 +60,10 @@ class DataResolverBase(ABC):
         tenant_id: str,
     ):
         self.__access_token: Optional[str] = None
+        self.__access_token_expiry_time: Optional[datetime] = None
         self.__tenant_id = tenant_id
         # Test connection by generating access token
-        logger.info("Trying to connect to {}".format(self._get_authority_url()))
+        logger.info(f"Trying to connect to {self._get_authority_url()}")
         # Power-Bi Auth (Service Principal Auth)
         self.__msal_client = msal.ConfidentialClientApplication(
             client_id,
@@ -58,7 +72,7 @@ class DataResolverBase(ABC):
         )
         self.get_access_token()
 
-        logger.info("Connected to {}".format(self._get_authority_url()))
+        logger.info(f"Connected to {self._get_authority_url()}")
         self._request_session = requests.Session()
         # set re-try parameter for request_session
         self._request_session.mount(
@@ -100,18 +114,23 @@ class DataResolverBase(ABC):
         pass
 
     @abstractmethod
+    def get_dataset_parameters(
+        self, workspace_id: str, dataset_id: str
+    ) -> Dict[str, str]:
+        pass
+
+    @abstractmethod
     def get_users(self, workspace_id: str, entity: str, entity_id: str) -> List[User]:
         pass
 
     def _get_authority_url(self):
-        return "{}{}".format(DataResolverBase.AUTHORITY, self.__tenant_id)
+        return f"{DataResolverBase.AUTHORITY}{self.__tenant_id}"
 
     def get_authorization_header(self):
         return {Constant.Authorization: self.get_access_token()}
 
     def get_access_token(self):
-        if self.__access_token is not None:
-            logger.debug("Returning the cached access token")
+        if self.__access_token is not None and not self._is_access_token_expired():
             return self.__access_token
 
         logger.info("Generating PowerBi access token")
@@ -133,10 +152,21 @@ class DataResolverBase(ABC):
         self.__access_token = "Bearer {}".format(
             auth_response.get(Constant.ACCESS_TOKEN)
         )
+        safety_gap = 300
+        self.__access_token_expiry_time = datetime.now() + timedelta(
+            seconds=(
+                max(auth_response.get(Constant.ACCESS_TOKEN_EXPIRY, 0) - safety_gap, 0)
+            )
+        )
 
         logger.debug(f"{Constant.PBIAccessToken}={self.__access_token}")
 
         return self.__access_token
+
+    def _is_access_token_expired(self) -> bool:
+        if not self.__access_token_expiry_time:
+            return True
+        return self.__access_token_expiry_time < datetime.now()
 
     def get_dashboards(self, workspace: Workspace) -> List[Dashboard]:
         """
@@ -163,6 +193,7 @@ class DataResolverBase(ABC):
                 id=instance.get(Constant.ID),
                 isReadOnly=instance.get(Constant.IS_READ_ONLY),
                 displayName=instance.get(Constant.DISPLAY_NAME),
+                description=instance.get(Constant.DESCRIPTION, ""),
                 embedUrl=instance.get(Constant.EMBED_URL),
                 webUrl=instance.get(Constant.WEB_URL),
                 workspace_id=workspace.id,
@@ -245,7 +276,7 @@ class DataResolverBase(ABC):
                 name=raw_instance.get(Constant.NAME),
                 webUrl=raw_instance.get(Constant.WEB_URL),
                 embedUrl=raw_instance.get(Constant.EMBED_URL),
-                description=raw_instance.get(Constant.DESCRIPTION),
+                description=raw_instance.get(Constant.DESCRIPTION, ""),
                 pages=self._get_pages_by_report(
                     workspace=workspace, report_id=raw_instance[Constant.ID]
                 ),
@@ -269,7 +300,6 @@ class DataResolverBase(ABC):
         return reports[0]
 
     def get_tiles(self, workspace: Workspace, dashboard: Dashboard) -> List[Tile]:
-
         """
         Get the list of tiles from PowerBi for the given workspace identifier
 
@@ -394,6 +424,36 @@ class RegularAPIResolver(DataResolverBase):
         # None/details
         return new_powerbi_dataset(workspace_id, response_dict)
 
+    def get_dataset_parameters(
+        self, workspace_id: str, dataset_id: str
+    ) -> Dict[str, str]:
+        dataset_get_endpoint: str = RegularAPIResolver.API_ENDPOINTS[
+            Constant.DATASET_GET
+        ]
+        dataset_get_endpoint = dataset_get_endpoint.format(
+            POWERBI_BASE_URL=DataResolverBase.BASE_URL,
+            WORKSPACE_ID=workspace_id,
+            DATASET_ID=dataset_id,
+        )
+        logger.debug(f"Request to dataset URL={dataset_get_endpoint}")
+        params_get_endpoint = dataset_get_endpoint + "/parameters"
+
+        params_response = self._request_session.get(
+            params_get_endpoint,
+            headers=self.get_authorization_header(),
+        )
+        params_response.raise_for_status()
+        params_dict = params_response.json()
+
+        params_values: List[dict] = params_dict.get(Constant.VALUE, [])
+
+        logger.debug(f"dataset {dataset_id} parameters = {params_values}")
+
+        return {
+            value[Constant.NAME]: value[Constant.CURRENT_VALUE]
+            for value in params_values
+        }
+
     def get_groups_endpoint(self) -> str:
         return DataResolverBase.BASE_URL
 
@@ -436,8 +496,9 @@ class RegularAPIResolver(DataResolverBase):
             headers=self.get_authorization_header(),
         )
 
-        # Check if we got response from PowerBi
-        response.raise_for_status()
+        if is_http_failure(response, f"Unable to fetch pages for report {report_id}"):
+            return []
+
         response_dict = response.json()
         return [
             Page(
@@ -456,7 +517,6 @@ class RegularAPIResolver(DataResolverBase):
 
 
 class AdminAPIResolver(DataResolverBase):
-
     # Admin access endpoints
     API_ENDPOINTS = {
         Constant.DASHBOARD_LIST: "{POWERBI_ADMIN_BASE_URL}/groups/{WORKSPACE_ID}/dashboards",
@@ -467,13 +527,14 @@ class AdminAPIResolver(DataResolverBase):
         Constant.SCAN_CREATE: "{POWERBI_ADMIN_BASE_URL}/workspaces/getInfo",
         Constant.ENTITY_USER_LIST: "{POWERBI_ADMIN_BASE_URL}/{ENTITY}/{ENTITY_ID}/users",
         Constant.DATASET_LIST: "{POWERBI_ADMIN_BASE_URL}/groups/{WORKSPACE_ID}/datasets",
+        Constant.WORKSPACE_MODIFIED_LIST: "{POWERBI_ADMIN_BASE_URL}/workspaces/modified",
     }
 
-    def create_scan_job(self, workspace_id: str) -> str:
+    def create_scan_job(self, workspace_ids: List[str]) -> str:
         """
         Create scan job on PowerBI for the workspace
         """
-        request_body = {"workspaces": [workspace_id]}
+        request_body = {"workspaces": workspace_ids}
 
         scan_create_endpoint = AdminAPIResolver.API_ENDPOINTS[Constant.SCAN_CREATE]
         scan_create_endpoint = scan_create_endpoint.format(
@@ -525,7 +586,7 @@ class AdminAPIResolver(DataResolverBase):
         logger.debug(f"Hitting URL={scan_get_endpoint}")
         retry = 1
         while True:
-            logger.info(f"retry = {retry}")
+            logger.debug(f"retry = {retry}")
             res = self._request_session.get(
                 scan_get_endpoint,
                 headers=self.get_authorization_header(),
@@ -546,7 +607,7 @@ class AdminAPIResolver(DataResolverBase):
                 )
                 break
 
-            logger.info(
+            logger.debug(
                 f"Waiting to check for scan job completion for {minimum_sleep_seconds} seconds."
             )
             sleep(minimum_sleep_seconds)
@@ -562,7 +623,7 @@ class AdminAPIResolver(DataResolverBase):
         max_retry: int = AdminAPIResolver._calculate_max_retry(
             minimum_sleep_seconds, timeout
         )
-        logger.info(f"Max trial {max_retry}")
+        # logger.info(f"Max trial {max_retry}")
 
         scan_get_endpoint = AdminAPIResolver.API_ENDPOINTS[Constant.SCAN_GET]
         scan_get_endpoint = scan_get_endpoint.format(
@@ -610,6 +671,12 @@ class AdminAPIResolver(DataResolverBase):
                 emailAddress=instance.get(Constant.EMAIL_ADDRESS),
                 graphId=instance.get(Constant.GRAPH_ID),
                 principalType=instance.get(Constant.PRINCIPAL_TYPE),
+                datasetUserAccessRight=instance.get(Constant.DATASET_USER_ACCESS_RIGHT),
+                reportUserAccessRight=instance.get(Constant.REPORT_USER_ACCESS_RIGHT),
+                dashboardUserAccessRight=instance.get(
+                    Constant.DASHBOARD_USER_ACCESS_RIGHT
+                ),
+                groupUserAccessRight=instance.get(Constant.GROUP_USER_ACCESS_RIGHT),
             )
             for instance in users_dict
         ]
@@ -645,7 +712,7 @@ class AdminAPIResolver(DataResolverBase):
             )
             return None
 
-        return res.json()["workspaces"][0]
+        return res.json()
 
     def get_groups_endpoint(self) -> str:
         return f"{AdminAPIResolver.ADMIN_BASE_URL}/groups"
@@ -704,3 +771,49 @@ class AdminAPIResolver(DataResolverBase):
 
     def _get_pages_by_report(self, workspace: Workspace, report_id: str) -> List[Page]:
         return []  # Report pages are not available in Admin API
+
+    def get_modified_workspaces(self, modified_since: str) -> List[str]:
+        """
+        Get list of modified workspaces
+        """
+        modified_workspaces_endpoint = self.API_ENDPOINTS[
+            Constant.WORKSPACE_MODIFIED_LIST
+        ].format(
+            POWERBI_ADMIN_BASE_URL=DataResolverBase.ADMIN_BASE_URL,
+        )
+        parameters: Dict[str, Any] = {
+            "excludePersonalWorkspaces": True,
+            "excludeInActiveWorkspaces": True,
+            "modifiedSince": modified_since,
+        }
+
+        res = self._request_session.get(
+            modified_workspaces_endpoint,
+            params=parameters,
+            headers=self.get_authorization_header(),
+        )
+        if res.status_code == 400:
+            error_msg_json = res.json()
+            if (
+                error_msg_json.get("error")
+                and error_msg_json["error"]["code"] == "InvalidRequest"
+            ):
+                raise ConfigurationError(
+                    "Please check if modified_since is within last 30 days."
+                )
+            else:
+                raise ConfigurationError(
+                    f"Please resolve the following error: {res.text}"
+                )
+        res.raise_for_status()
+
+        # Return scan_id of Scan created for the given workspace
+        workspace_ids = [row["id"] for row in res.json()]
+        logger.debug(f"modified workspace_ids: {workspace_ids}")
+        return workspace_ids
+
+    def get_dataset_parameters(
+        self, workspace_id: str, dataset_id: str
+    ) -> Dict[str, str]:
+        logger.debug("Get dataset parameter is unsupported in Admin API")
+        return {}

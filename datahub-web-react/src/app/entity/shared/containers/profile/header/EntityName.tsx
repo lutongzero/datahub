@@ -2,10 +2,12 @@ import { message, Typography } from 'antd';
 import React, { useState, useEffect } from 'react';
 import styled from 'styled-components/macro';
 import { useUpdateNameMutation } from '../../../../../../graphql/mutations.generated';
+import { getParentNodeToUpdate, updateGlossarySidebar } from '../../../../../glossary/utils';
 import { useEntityRegistry } from '../../../../../useEntityRegistry';
 import { useEntityData, useRefetch } from '../../../EntityContext';
+import { useGlossaryEntityData } from '../../../GlossaryEntityContext';
 
-const EntityTitle = styled(Typography.Title)`
+export const EntityTitle = styled(Typography.Title)`
     margin-right: 10px;
 
     &&& {
@@ -27,22 +29,37 @@ function EntityName(props: Props) {
     const { isNameEditable } = props;
     const refetch = useRefetch();
     const entityRegistry = useEntityRegistry();
+    const { isInGlossaryContext, urnsToUpdate, setUrnsToUpdate } = useGlossaryEntityData();
     const { urn, entityType, entityData } = useEntityData();
     const entityName = entityData ? entityRegistry.getDisplayName(entityType, entityData) : '';
     const [updatedName, setUpdatedName] = useState(entityName);
+    const [isEditing, setIsEditing] = useState(false);
 
     useEffect(() => {
         setUpdatedName(entityName);
     }, [entityName]);
 
-    const [updateName] = useUpdateNameMutation();
+    const [updateName, { loading: isMutatingName }] = useUpdateNameMutation();
 
-    const handleSaveName = async (name: string) => {
+    const handleStartEditing = () => {
+        setIsEditing(true);
+    };
+
+    const handleChangeName = (name: string) => {
+        if (name === entityName) {
+            setIsEditing(false);
+            return;
+        }
         setUpdatedName(name);
         updateName({ variables: { input: { name, urn } } })
             .then(() => {
+                setIsEditing(false);
                 message.success({ content: 'Name Updated', duration: 2 });
                 refetch();
+                if (isInGlossaryContext) {
+                    const parentNodeToUpdate = getParentNodeToUpdate(entityData, entityType);
+                    updateGlossarySidebar([parentNodeToUpdate], urnsToUpdate, setUrnsToUpdate);
+                }
             })
             .catch((e: unknown) => {
                 message.destroy();
@@ -55,13 +72,19 @@ function EntityName(props: Props) {
     return (
         <>
             {isNameEditable ? (
-                <EntityTitle level={3} editable={{ onChange: handleSaveName }}>
+                <EntityTitle
+                    level={3}
+                    disabled={isMutatingName}
+                    editable={{
+                        editing: isEditing,
+                        onChange: handleChangeName,
+                        onStart: handleStartEditing,
+                    }}
+                >
                     {updatedName}
                 </EntityTitle>
             ) : (
-                <EntityTitle level={3}>
-                    {entityData && entityRegistry.getDisplayName(entityType, entityData)}
-                </EntityTitle>
+                <EntityTitle level={3}>{entityName}</EntityTitle>
             )}
         </>
     );

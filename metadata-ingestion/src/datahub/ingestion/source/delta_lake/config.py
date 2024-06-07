@@ -4,12 +4,13 @@ from typing import Optional
 import pydantic
 from cached_property import cached_property
 from pydantic import Field
+from typing_extensions import Literal
 
 from datahub.configuration.common import AllowDenyPattern
 from datahub.configuration.source_common import (
     ConfigModel,
-    EnvBasedSourceConfigBase,
-    PlatformSourceConfigBase,
+    EnvConfigMixin,
+    PlatformInstanceConfigMixin,
 )
 from datahub.ingestion.source.aws.aws_common import AwsConnectionConfig
 from datahub.ingestion.source.aws.s3_util import is_s3_uri
@@ -35,7 +36,7 @@ class S3(ConfigModel):
     )
 
 
-class DeltaLakeSourceConfig(PlatformSourceConfigBase, EnvBasedSourceConfigBase):
+class DeltaLakeSourceConfig(PlatformInstanceConfigMixin, EnvConfigMixin):
     base_path: str = Field(
         description="Path to table (s3 or local file system). If path is not a delta table path "
         "then all subfolders will be scanned to detect and ingest delta tables."
@@ -46,10 +47,9 @@ class DeltaLakeSourceConfig(PlatformSourceConfigBase, EnvBasedSourceConfigBase):
         "'<base_path>/<relative_path>' and URNs will be created using "
         "relative_path only.",
     )
-    platform: str = Field(
+    platform: Literal["delta-lake"] = Field(
         default="delta-lake",
         description="The platform that this source connects to",
-        const=True,
     )
     platform_instance: Optional[str] = Field(
         default=None,

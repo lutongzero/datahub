@@ -1,13 +1,10 @@
-import React, { useState } from 'react';
+import React, { useEffect, useState } from 'react';
 import { Button, Typography } from 'antd';
 import { PlusOutlined } from '@ant-design/icons';
 import styled from 'styled-components/macro';
 import { useGetRootGlossaryNodesQuery, useGetRootGlossaryTermsQuery } from '../../graphql/glossary.generated';
 import TabToolbar from '../entity/shared/components/styled/TabToolbar';
 import GlossaryEntitiesList from './GlossaryEntitiesList';
-import GlossaryBrowser from './GlossaryBrowser/GlossaryBrowser';
-import GlossarySearch from './GlossarySearch';
-import { ProfileSidebarResizer } from '../entity/shared/containers/profile/sidebar/ProfileSidebarResizer';
 import EmptyGlossarySection from './EmptyGlossarySection';
 import CreateGlossaryEntityModal from '../entity/shared/EntityDropdown/CreateGlossaryEntityModal';
 import { EntityType } from '../../types.generated';
@@ -15,13 +12,16 @@ import { Message } from '../shared/Message';
 import { sortGlossaryTerms } from '../entity/glossaryTerm/utils';
 import { useEntityRegistry } from '../useEntityRegistry';
 import { sortGlossaryNodes } from '../entity/glossaryNode/utils';
-import { useGetAuthenticatedUser } from '../useGetAuthenticatedUser';
 import {
     BUSINESS_GLOSSARY_INTRO_ID,
     BUSINESS_GLOSSARY_CREATE_TERM_ID,
     BUSINESS_GLOSSARY_CREATE_TERM_GROUP_ID,
 } from '../onboarding/config/BusinessGlossaryOnboardingConfig';
 import { OnboardingTour } from '../onboarding/OnboardingTour';
+import { useGlossaryEntityData } from '../entity/shared/GlossaryEntityContext';
+import { useUserContext } from '../context/useUserContext';
+import useToggleSidebar from './useToggleSidebar';
+import ToggleSidebarButton from '../search/ToggleSidebarButton';
 
 export const HeaderWrapper = styled(TabToolbar)`
     padding: 15px 45px 10px 24px;
@@ -40,17 +40,16 @@ const MainContentWrapper = styled.div`
     flex-direction: column;
 `;
 
-export const BrowserWrapper = styled.div<{ width: number }>`
-    max-height: 100%;
-    width: ${(props) => props.width}px;
-    min-width: ${(props) => props.width}px;
+const TitleContainer = styled.div`
+    display: flex;
+    align-items: center;
+    gap: 12px;
 `;
 
 export const MAX_BROWSER_WIDTH = 500;
 export const MIN_BROWSWER_WIDTH = 200;
 
 function BusinessGlossaryPage() {
-    const [browserWidth, setBrowserWidth] = useState(window.innerWidth * 0.2);
     const {
         data: termsData,
         refetch: refetchForTerms,
@@ -64,6 +63,12 @@ function BusinessGlossaryPage() {
         error: nodesError,
     } = useGetRootGlossaryNodesQuery();
     const entityRegistry = useEntityRegistry();
+    const { setEntityData } = useGlossaryEntityData();
+    const { isOpen: isSidebarOpen, toggleSidebar } = useToggleSidebar();
+
+    useEffect(() => {
+        setEntityData(null);
+    }, [setEntityData]);
 
     const terms = termsData?.getRootGlossaryTerms?.terms.sort((termA, termB) =>
         sortGlossaryTerms(entityRegistry, termA, termB),
@@ -77,7 +82,7 @@ function BusinessGlossaryPage() {
     const [isCreateTermModalVisible, setIsCreateTermModalVisible] = useState(false);
     const [isCreateNodeModalVisible, setIsCreateNodeModalVisible] = useState(false);
 
-    const user = useGetAuthenticatedUser();
+    const user = useUserContext();
     const canManageGlossaries = user?.platformPrivileges?.manageGlossaries;
 
     return (
@@ -96,22 +101,17 @@ function BusinessGlossaryPage() {
                 {(termsError || nodesError) && (
                     <Message type="error" content="Failed to load glossary! An unexpected error occurred." />
                 )}
-                <BrowserWrapper width={browserWidth}>
-                    <GlossarySearch />
-                    <GlossaryBrowser rootNodes={nodes} rootTerms={terms} />
-                </BrowserWrapper>
-                <ProfileSidebarResizer
-                    setSidePanelWidth={(width) =>
-                        setBrowserWidth(Math.min(Math.max(width, MIN_BROWSWER_WIDTH), MAX_BROWSER_WIDTH))
-                    }
-                    initialSize={browserWidth}
-                    isSidebarOnLeft
-                />
-                <MainContentWrapper>
+                <MainContentWrapper data-testid="glossary-entities-list">
                     <HeaderWrapper>
-                        <Typography.Title level={3}>Business Glossary</Typography.Title>
+                        <TitleContainer>
+                            <ToggleSidebarButton isOpen={isSidebarOpen} onClick={toggleSidebar} />
+                            <Typography.Title style={{ margin: '0' }} level={3}>
+                                Business Glossary
+                            </Typography.Title>
+                        </TitleContainer>
                         <div>
                             <Button
+                                data-testid="add-term-button"
                                 id={BUSINESS_GLOSSARY_CREATE_TERM_ID}
                                 disabled={!canManageGlossaries}
                                 type="text"
@@ -120,6 +120,7 @@ function BusinessGlossaryPage() {
                                 <PlusOutlined /> Add Term
                             </Button>
                             <Button
+                                data-testid="add-term-group-button"
                                 id={BUSINESS_GLOSSARY_CREATE_TERM_GROUP_ID}
                                 disabled={!canManageGlossaries}
                                 type="text"

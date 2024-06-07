@@ -1,20 +1,20 @@
 import json
-import tempfile
-import time
+import logging
 import sys
+import tempfile
 from json import JSONDecodeError
 from typing import Any, Dict, List, Optional
 
-from click.testing import CliRunner, Result
-
 import datahub.emitter.mce_builder as builder
+from click.testing import CliRunner, Result
 from datahub.emitter.serialization_helper import pre_json_transform
 from datahub.entrypoints import datahub
 from datahub.metadata.schema_classes import DatasetProfileClass
-from tests.aspect_generators.timeseries.dataset_profile_gen import \
-    gen_dataset_profiles
-from tests.utils import get_strftime_from_timestamp_millis
-import requests_wrapper as requests
+
+from tests.aspect_generators.timeseries.dataset_profile_gen import gen_dataset_profiles
+from tests.utils import get_strftime_from_timestamp_millis, wait_for_writes_to_sync
+
+logger = logging.getLogger(__name__)
 
 test_aspect_name: str = "datasetProfile"
 test_dataset_urn: str = builder.make_dataset_urn_with_platform_instance(
@@ -28,7 +28,7 @@ runner = CliRunner(mix_stderr=False)
 
 
 def sync_elastic() -> None:
-    time.sleep(requests.ELASTICSEARCH_REFRESH_INTERVAL_SECONDS)
+    wait_for_writes_to_sync()
 
 
 def datahub_put_profile(dataset_profile: DatasetProfileClass) -> None:
@@ -79,6 +79,9 @@ def datahub_delete(params: List[str]) -> None:
     args.extend(params)
     args.append("--hard")
     delete_result: Result = runner.invoke(datahub, args, input="y\ny\n")
+    logger.info(delete_result.stdout)
+    if delete_result.stderr:
+        logger.error(delete_result.stderr)
     assert delete_result.exit_code == 0
 
 
