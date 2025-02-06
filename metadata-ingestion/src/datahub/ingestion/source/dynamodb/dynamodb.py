@@ -52,24 +52,23 @@ from datahub.ingestion.source.state.stale_entity_removal_handler import (
 from datahub.ingestion.source.state.stateful_ingestion_base import (
     StatefulIngestionSourceBase,
 )
-from datahub.metadata.com.linkedin.pegasus2avro.schema import (
+from datahub.metadata.schema_classes import (
     ArrayTypeClass,
     BooleanTypeClass,
     BytesTypeClass,
+    DataPlatformInstanceClass,
+    DatasetPropertiesClass,
     NullTypeClass,
     NumberTypeClass,
     RecordTypeClass,
-    SchemaField,
-    SchemaFieldDataType,
+    SchemaFieldClass as SchemaField,
+    SchemaFieldDataTypeClass as SchemaFieldDataType,
     SchemalessClass,
-    SchemaMetadata,
+    SchemaMetadataClass,
     StringTypeClass,
     UnionTypeClass,
 )
-from datahub.metadata.schema_classes import (
-    DataPlatformInstanceClass,
-    DatasetPropertiesClass,
-)
+from datahub.utilities.lossy_collections import LossyList
 from datahub.utilities.registries.domain_registry import DomainRegistry
 
 MAX_ITEMS_TO_RETRIEVE = 100
@@ -122,7 +121,7 @@ class DynamoDBConfig(
 
 @dataclass
 class DynamoDBSourceReport(StaleEntityRemovalSourceReport, ClassificationReportMixin):
-    filtered: List[str] = field(default_factory=list)
+    filtered: LossyList[str] = field(default_factory=LossyList)
 
     def report_dropped(self, name: str) -> None:
         self.filtered.append(name)
@@ -165,11 +164,6 @@ _attribute_type_to_field_type_mapping: Dict[str, Type] = {
 @capability(
     SourceCapability.PLATFORM_INSTANCE,
     "By default, platform_instance will use the AWS account id",
-)
-@capability(
-    SourceCapability.DELETION_DETECTION,
-    "Optionally enabled via `stateful_ingestion.remove_stale_metadata`",
-    supported=True,
 )
 class DynamoDBSource(StatefulIngestionSourceBase):
     """
@@ -240,7 +234,6 @@ class DynamoDBSource(StatefulIngestionSourceBase):
         table_name: str,
         dataset_name: str,
     ) -> Iterable[MetadataWorkUnit]:
-
         logger.debug(f"Processing table: {dataset_name}")
         table_info = dynamodb_client.describe_table(TableName=table_name)["Table"]
         account_id = table_info["TableArn"].split(":")[4]
@@ -453,7 +446,7 @@ class DynamoDBSource(StatefulIngestionSourceBase):
         dataset_properties: DatasetPropertiesClass,
         schema: Dict[Tuple[str, ...], SchemaDescription],
         primary_key_dict: Dict[str, str],
-    ) -> SchemaMetadata:
+    ) -> SchemaMetadataClass:
         """ "
         To construct the schema metadata, it will first sort the schema by the occurrence of attribute names
         in descending order and truncate the schema by MAX_SCHEMA_SIZE, and then start to construct the
@@ -466,8 +459,9 @@ class DynamoDBSource(StatefulIngestionSourceBase):
         if schema_size > MAX_SCHEMA_SIZE:
             # downsample the schema, using frequency as the sort key
             self.report.report_warning(
-                key=dataset_urn,
-                reason=f"Downsampling the table schema because MAX_SCHEMA_SIZE threshold is {MAX_SCHEMA_SIZE}",
+                title="Schema Size Too Large",
+                message=f"Downsampling the table schema because MAX_SCHEMA_SIZE threshold is {MAX_SCHEMA_SIZE}",
+                context=f"Collection: {dataset_urn}",
             )
 
             # Add this information to the custom properties so user can know they are looking at down sampled schema
@@ -506,7 +500,7 @@ class DynamoDBSource(StatefulIngestionSourceBase):
             canonical_schema.append(field)
 
         # create schema metadata object for table
-        schema_metadata = SchemaMetadata(
+        schema_metadata = SchemaMetadataClass(
             schemaName=table_name,
             platform=f"urn:li:dataPlatform:{self.platform}",
             version=0,
@@ -535,7 +529,9 @@ class DynamoDBSource(StatefulIngestionSourceBase):
         )
         if type_string is None:
             self.report.report_warning(
-                table_name, f"unable to map type {attribute_type} to native data type"
+                title="Unable to Map Attribute Type",
+                message=f"Unable to map type {attribute_type} to native data type",
+                context=f"Collection: {table_name}",
             )
             return _attribute_type_to_native_type_mapping[attribute_type]
         return type_string
@@ -550,8 +546,9 @@ class DynamoDBSource(StatefulIngestionSourceBase):
 
         if type_class is None:
             self.report.report_warning(
-                table_name,
-                f"unable to map type {attribute_type} to metadata schema field type",
+                title="Unable to Map Field Type",
+                message=f"Unable to map type {attribute_type} to metadata schema field type",
+                context=f"Collection: {table_name}",
             )
             type_class = NullTypeClass
         return SchemaFieldDataType(type=type_class())

@@ -3,6 +3,8 @@ plugins {
   id 'org.hidetake.swagger.generator'
 }
 
+apply from: '../../gradle/coverage/java-coverage.gradle'
+
 dependencies {
 
   implementation project(':metadata-auth:auth-api')
@@ -21,6 +23,7 @@ dependencies {
   implementation externalDependency.springWebMVC
   implementation externalDependency.springBeans
   implementation externalDependency.springContext
+  implementation externalDependency.servletApi
   implementation externalDependency.slf4jApi
   compileOnly externalDependency.lombok
   implementation externalDependency.antlr4Runtime
@@ -29,8 +32,13 @@ dependencies {
   implementation externalDependency.guava
   implementation('io.acryl:json-schema-avro:0.2.3')
   implementation externalDependency.jsonSchemaValidator
+  implementation group: 'io.github.deblockt', name: 'json-diff', version: '1.1.0'
 
   annotationProcessor externalDependency.lombok
+
+  implementation externalDependency.opentelemetryApi
+  implementation externalDependency.opentelemetrySdk
+  implementation externalDependency.opentelemetrySdkTrace
 
   testImplementation externalDependency.springBootTest
   testImplementation project(':mock-entity-registry')

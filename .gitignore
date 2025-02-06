@@ -85,6 +85,7 @@ metadata-service/plugin/src/test/resources/sample-plugins/**
 smoke-test/rollback-reports
 coverage*.xml
 .vercel
+.envrc
 
 # A long series of binary directories we should ignore
 datahub-frontend/bin/main/
@@ -126,3 +127,6 @@ metadata-service/war/bin/
 metadata-utils/bin/
 test-models/bin/
 
+datahub-executor/
+datahub-integrations-service/
+metadata-ingestion-modules/acryl-cloud

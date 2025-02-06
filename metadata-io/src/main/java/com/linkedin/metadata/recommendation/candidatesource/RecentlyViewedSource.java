@@ -1,10 +1,10 @@
 package com.linkedin.metadata.recommendation.candidatesource;
 
-import com.codahale.metrics.Timer;
 import com.datahub.util.exception.ESQueryException;
 import com.google.common.collect.ImmutableSet;
 import com.linkedin.common.urn.Urn;
 import com.linkedin.metadata.Constants;
+import com.linkedin.metadata.aspect.AspectRetriever;
 import com.linkedin.metadata.datahubusage.DataHubUsageEventConstants;
 import com.linkedin.metadata.datahubusage.DataHubUsageEventType;
 import com.linkedin.metadata.entity.EntityService;
@@ -17,7 +17,7 @@ import com.linkedin.metadata.search.utils.ESUtils;
 import com.linkedin.metadata.utils.elasticsearch.IndexConvention;
 import com.linkedin.metadata.utils.metrics.MetricUtils;
 import io.datahubproject.metadata.context.OperationContext;
-import io.opentelemetry.extension.annotations.WithSpan;
+import io.opentelemetry.instrumentation.annotations.WithSpan;
 import java.io.IOException;
 import java.util.List;
 import java.util.Set;
@@ -104,23 +104,31 @@ public class RecentlyViewedSource implements EntityRecommendationSource {
       @Nonnull RecommendationRequestContext requestContext,
       @Nullable Filter filter) {
     SearchRequest searchRequest =
-        buildSearchRequest(opContext.getSessionActorContext().getActorUrn());
-    try (Timer.Context ignored = MetricUtils.timer(this.getClass(), "getRecentlyViewed").time()) {
-      final SearchResponse searchResponse =
-          _searchClient.search(searchRequest, RequestOptions.DEFAULT);
-      // extract results
-      ParsedTerms parsedTerms = searchResponse.getAggregations().get(ENTITY_AGG_NAME);
-      List<String> bucketUrns =
-          parsedTerms.getBuckets().stream()
-              .map(MultiBucketsAggregation.Bucket::getKeyAsString)
-              .collect(Collectors.toList());
-      return buildContent(opContext, bucketUrns, _entityService)
-          .limit(MAX_CONTENT)
-          .collect(Collectors.toList());
-    } catch (Exception e) {
-      log.error("Search query to get most recently viewed entities failed", e);
-      throw new ESQueryException("Search query failed:", e);
-    }
+        buildSearchRequest(
+            opContext.getSessionActorContext().getActorUrn(), opContext.getAspectRetriever());
+
+    return opContext.withSpan(
+        "getRecentlyViewed",
+        () -> {
+          try {
+            final SearchResponse searchResponse =
+                _searchClient.search(searchRequest, RequestOptions.DEFAULT);
+            // extract results
+            ParsedTerms parsedTerms = searchResponse.getAggregations().get(ENTITY_AGG_NAME);
+            List<String> bucketUrns =
+                parsedTerms.getBuckets().stream()
+                    .map(MultiBucketsAggregation.Bucket::getKeyAsString)
+                    .collect(Collectors.toList());
+            return buildContent(opContext, bucketUrns, _entityService)
+                .limit(MAX_CONTENT)
+                .collect(Collectors.toList());
+          } catch (Exception e) {
+            log.error("Search query to get most recently viewed entities failed", e);
+            throw new ESQueryException("Search query failed:", e);
+          }
+        },
+        MetricUtils.DROPWIZARD_NAME,
+        MetricUtils.name(this.getClass(), "getRecentlyViewed"));
   }
 
   @Override
@@ -128,7 +136,8 @@ public class RecentlyViewedSource implements EntityRecommendationSource {
     return SUPPORTED_ENTITY_TYPES;
   }
 
-  private SearchRequest buildSearchRequest(@Nonnull Urn userUrn) {
+  private SearchRequest buildSearchRequest(
+      @Nonnull Urn userUrn, @Nullable AspectRetriever aspectRetriever) {
     // TODO: Proactively filter for entity types in the supported set.
     SearchRequest request = new SearchRequest();
     SearchSourceBuilder source = new SearchSourceBuilder();
@@ -136,7 +145,7 @@ public class RecentlyViewedSource implements EntityRecommendationSource {
     // Filter for the entity view events of the user requesting recommendation
     query.must(
         QueryBuilders.termQuery(
-            ESUtils.toKeywordField(DataHubUsageEventConstants.ACTOR_URN, false),
+            ESUtils.toKeywordField(DataHubUsageEventConstants.ACTOR_URN, false, aspectRetriever),
             userUrn.toString()));
     query.must(
         QueryBuilders.termQuery(
@@ -147,7 +156,9 @@ public class RecentlyViewedSource implements EntityRecommendationSource {
     String lastViewed = "last_viewed";
     AggregationBuilder aggregation =
         AggregationBuilders.terms(ENTITY_AGG_NAME)
-            .field(ESUtils.toKeywordField(DataHubUsageEventConstants.ENTITY_URN, false))
+            .field(
+                ESUtils.toKeywordField(
+                    DataHubUsageEventConstants.ENTITY_URN, false, aspectRetriever))
             .size(MAX_CONTENT)
             .order(BucketOrder.aggregation(lastViewed, false))
             .subAggregation(

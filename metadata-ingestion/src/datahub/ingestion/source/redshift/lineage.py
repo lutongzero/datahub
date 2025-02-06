@@ -4,7 +4,7 @@ from collections import defaultdict
 from dataclasses import dataclass, field
 from datetime import datetime
 from enum import Enum
-from typing import Dict, List, Optional, Set, Tuple, Union
+from typing import Dict, Iterable, List, Optional, Set, Tuple, Union
 from urllib.parse import urlparse
 
 import humanfriendly
@@ -53,6 +53,8 @@ from datahub.metadata.schema_classes import (
 )
 from datahub.metadata.urns import DatasetUrn
 from datahub.sql_parsing.schema_resolver import SchemaResolver
+from datahub.sql_parsing.sql_parsing_aggregator import TableRename
+from datahub.sql_parsing.sqlglot_utils import get_dialect, parse_statement
 from datahub.utilities import memory_footprint
 from datahub.utilities.dedup_list import deduplicate_list
 
@@ -128,11 +130,11 @@ def parse_alter_table_rename(default_schema: str, query: str) -> Tuple[str, str,
     Parses an ALTER TABLE ... RENAME TO ... query and returns the schema, previous table name, and new table name.
     """
 
-    parsed_query = sqlglot.parse_one(query, dialect="redshift")
-    assert isinstance(parsed_query, sqlglot.exp.AlterTable)
+    parsed_query = parse_statement(query, dialect=get_dialect("redshift"))
+    assert isinstance(parsed_query, sqlglot.exp.Alter)
     prev_name = parsed_query.this.name
     rename_clause = parsed_query.args["actions"][0]
-    assert isinstance(rename_clause, sqlglot.exp.RenameTable)
+    assert isinstance(rename_clause, sqlglot.exp.AlterRename)
     new_name = rename_clause.this.name
 
     schema = parsed_query.this.db or default_schema
@@ -503,21 +505,21 @@ class RedshiftLineageExtractor:
             self.report_status(f"extract-{lineage_type.name}", False)
 
     def _update_lineage_map_for_table_renames(
-        self, table_renames: Dict[str, str]
+        self, table_renames: Dict[str, TableRename]
     ) -> None:
         if not table_renames:
             return
 
         logger.info(f"Updating lineage map for {len(table_renames)} table renames")
-        for new_table_urn, prev_table_urn in table_renames.items():
+        for entry in table_renames.values():
             # This table was renamed from some other name, copy in the lineage
             # for the previous name as well.
-            prev_table_lineage = self._lineage_map.get(prev_table_urn)
+            prev_table_lineage = self._lineage_map.get(entry.original_urn)
             if prev_table_lineage:
                 logger.debug(
-                    f"including lineage for {prev_table_urn} in {new_table_urn} due to table rename"
+                    f"including lineage for {entry.original_urn} in {entry.new_urn} due to table rename"
                 )
-                self._lineage_map[new_table_urn].merge_lineage(
+                self._lineage_map[entry.new_urn].merge_lineage(
                     upstreams=prev_table_lineage.upstreams,
                     cll=prev_table_lineage.cll,
                 )
@@ -661,7 +663,7 @@ class RedshiftLineageExtractor:
         if self.config.resolve_temp_table_in_lineage:
             self._init_temp_table_schema(
                 database=database,
-                temp_tables=self.get_temp_tables(connection=connection),
+                temp_tables=list(self.get_temp_tables(connection=connection)),
             )
 
         populate_calls: List[Tuple[str, LineageCollectorType]] = []
@@ -671,7 +673,7 @@ class RedshiftLineageExtractor:
             for db, schemas in all_tables.items()
         }
 
-        table_renames: Dict[str, str] = {}
+        table_renames: Dict[str, TableRename] = {}
         if self.config.include_table_rename_lineage:
             table_renames, all_tables_set = self._process_table_renames(
                 database=database,
@@ -850,11 +852,11 @@ class RedshiftLineageExtractor:
         database: str,
         connection: redshift_connector.Connection,
         all_tables: Dict[str, Dict[str, Set[str]]],
-    ) -> Tuple[Dict[str, str], Dict[str, Dict[str, Set[str]]]]:
+    ) -> Tuple[Dict[str, TableRename], Dict[str, Dict[str, Set[str]]]]:
         logger.info(f"Processing table renames for db {database}")
 
         # new urn -> prev urn
-        table_renames: Dict[str, str] = {}
+        table_renames: Dict[str, TableRename] = {}
 
         query = self.queries.alter_table_rename_query(
             db_name=database,
@@ -865,10 +867,19 @@ class RedshiftLineageExtractor:
         for rename_row in RedshiftDataDictionary.get_alter_table_commands(
             connection, query
         ):
-            schema, prev_name, new_name = parse_alter_table_rename(
-                default_schema=self.config.default_schema,
-                query=rename_row.query_text,
-            )
+            # Redshift's system table has some issues where it encodes newlines as \n instead a proper
+            # newline character. This can cause issues in our parser.
+            query_text = rename_row.query_text.replace("\\n", "\n")
+
+            try:
+                schema, prev_name, new_name = parse_alter_table_rename(
+                    default_schema=self.config.default_schema,
+                    query=query_text,
+                )
+            except Exception as e:
+                logger.info(f"Failed to parse alter table rename: {e}")
+                self.report.num_alter_table_parse_errors += 1
+                continue
 
             prev_urn = make_dataset_urn_with_platform_instance(
                 platform=LineageDatasetPlatform.REDSHIFT.value,
@@ -883,7 +894,9 @@ class RedshiftLineageExtractor:
                 env=self.config.env,
             )
 
-            table_renames[new_urn] = prev_urn
+            table_renames[new_urn] = TableRename(
+                prev_urn, new_urn, query_text, timestamp=rename_row.start_time
+            )
 
             # We want to generate lineage for the previous name too.
             all_tables[database][schema].add(prev_name)
@@ -893,7 +906,7 @@ class RedshiftLineageExtractor:
 
     def get_temp_tables(
         self, connection: redshift_connector.Connection
-    ) -> List[TempTableRow]:
+    ) -> Iterable[TempTableRow]:
         ddl_query: str = self.queries.temp_table_ddl_query(
             start_time=self.config.start_time,
             end_time=self.config.end_time,
@@ -901,15 +914,11 @@ class RedshiftLineageExtractor:
 
         logger.debug(f"Temporary table ddl query = {ddl_query}")
 
-        temp_table_rows: List[TempTableRow] = []
-
         for row in RedshiftDataDictionary.get_temporary_rows(
             conn=connection,
             query=ddl_query,
         ):
-            temp_table_rows.append(row)
-
-        return temp_table_rows
+            yield row
 
     def find_temp_tables(
         self, temp_table_rows: List[TempTableRow], temp_table_names: List[str]

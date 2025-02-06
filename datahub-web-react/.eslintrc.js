@@ -48,11 +48,19 @@ module.exports = {
         ],
         'vitest/prefer-to-be': 'off',
         '@typescript-eslint/no-use-before-define': ['error', { functions: false, classes: false }],
-        'react-refresh/only-export-components': ['warn', { 'allowConstantExport': true }],
+        'react-refresh/only-export-components': ['warn', { allowConstantExport: true }],
     },
     settings: {
         react: {
             version: 'detect', // Tells eslint-plugin-react to automatically detect the version of React to use
         },
     },
+	overrides: [
+		{
+			files: ['src/app/searchV2/**/*.tsx', 'src/app/entityV2/**/*.tsx'],
+			rules: {
+				'import/no-cycle': 'off',
+			},
+		},
+	],
 };

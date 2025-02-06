@@ -26,6 +26,7 @@ import java.net.URISyntaxException;
 import java.util.Collection;
 import java.util.List;
 import java.util.Map;
+import java.util.Optional;
 import java.util.Set;
 import java.util.concurrent.Future;
 import java.util.function.Consumer;
@@ -40,13 +41,15 @@ public interface EntityService<U extends ChangeMCP> {
    * @param urns urns for the entities
    * @param aspectName aspect for the entity, if null, assumes key aspect
    * @param includeSoftDelete including soft deleted entities
+   * @param forUpdate whether the operation is intending to write to this row in a tx
    * @return set of urns with the specified aspect existing
    */
   Set<Urn> exists(
       @Nonnull OperationContext opContext,
       @Nonnull final Collection<Urn> urns,
       @Nullable String aspectName,
-      boolean includeSoftDelete);
+      boolean includeSoftDelete,
+      boolean forUpdate);
 
   /**
    * Just whether the entity/aspect exists, prefer batched method.
@@ -61,20 +64,37 @@ public interface EntityService<U extends ChangeMCP> {
       @Nonnull Urn urn,
       @Nullable String aspectName,
       boolean includeSoftDelete) {
-    return exists(opContext, Set.of(urn), aspectName, includeSoftDelete).contains(urn);
+    return exists(opContext, Set.of(urn), aspectName, includeSoftDelete, false).contains(urn);
   }
 
   /**
    * Returns a set of urns of entities that exist (has materialized aspects).
    *
    * @param urns the list of urns of the entities to check
+   * @param includeSoftDelete including soft deleted entities
    * @return a set of urns of entities that exist.
    */
   default Set<Urn> exists(
       @Nonnull OperationContext opContext,
       @Nonnull final Collection<Urn> urns,
       boolean includeSoftDelete) {
-    return exists(opContext, urns, null, includeSoftDelete);
+    return exists(opContext, urns, null, includeSoftDelete, false);
+  }
+
+  /**
+   * Returns a set of urns of entities that exist (has materialized aspects).
+   *
+   * @param urns the list of urns of the entities to check
+   * @param includeSoftDelete including soft deleted entities
+   * @param forUpdate whether the operation is intending to write to this row in a tx
+   * @return a set of urns of entities that exist.
+   */
+  default Set<Urn> exists(
+      @Nonnull OperationContext opContext,
+      @Nonnull final Collection<Urn> urns,
+      boolean includeSoftDelete,
+      boolean forUpdate) {
+    return exists(opContext, urns, null, includeSoftDelete, forUpdate);
   }
 
   /**
@@ -85,7 +105,19 @@ public interface EntityService<U extends ChangeMCP> {
    */
   default Set<Urn> exists(
       @Nonnull OperationContext opContext, @Nonnull final Collection<Urn> urns) {
-    return exists(opContext, urns, true);
+    return exists(opContext, urns, true, false);
+  }
+
+  /**
+   * Returns whether the urn of the entity exists (has materialized aspects).
+   *
+   * @param urn the urn of the entity to check
+   * @param includeSoftDelete including soft deleted entities
+   * @return entities exists.
+   */
+  default boolean exists(
+      @Nonnull OperationContext opContext, @Nonnull Urn urn, boolean includeSoftDelete) {
+    return exists(opContext, List.of(urn), includeSoftDelete, false).contains(urn);
   }
 
   /**
@@ -95,8 +127,11 @@ public interface EntityService<U extends ChangeMCP> {
    * @return entities exists.
    */
   default boolean exists(
-      @Nonnull OperationContext opContext, @Nonnull Urn urn, boolean includeSoftDelete) {
-    return exists(opContext, List.of(urn), includeSoftDelete).contains(urn);
+      @Nonnull OperationContext opContext,
+      @Nonnull Urn urn,
+      boolean includeSoftDelete,
+      boolean forUpdate) {
+    return exists(opContext, List.of(urn), includeSoftDelete, forUpdate).contains(urn);
   }
 
   /**
@@ -106,7 +141,7 @@ public interface EntityService<U extends ChangeMCP> {
    * @return entities exists.
    */
   default boolean exists(@Nonnull OperationContext opContext, @Nonnull Urn urn) {
-    return exists(opContext, urn, true);
+    return exists(opContext, urn, true, false);
   }
 
   /**
@@ -115,17 +150,29 @@ public interface EntityService<U extends ChangeMCP> {
    *
    * @param urns set of urns to fetch aspects for
    * @param aspectNames aspects to fetch for each urn in urns set
+   * @param alwaysIncludeKeyAspect historically the key aspect was always added, allow disabling
+   *     this behavior
    * @return a map of provided {@link Urn} to a List containing the requested aspects.
    */
   Map<Urn, List<RecordTemplate>> getLatestAspects(
       @Nonnull OperationContext opContext,
       @Nonnull final Set<Urn> urns,
-      @Nonnull final Set<String> aspectNames);
+      @Nonnull final Set<String> aspectNames,
+      boolean alwaysIncludeKeyAspect);
+
+  @Deprecated
+  default Map<Urn, List<RecordTemplate>> getLatestAspects(
+      @Nonnull OperationContext opContext,
+      @Nonnull final Set<Urn> urns,
+      @Nonnull final Set<String> aspectNames) {
+    return getLatestAspects(opContext, urns, aspectNames, true);
+  }
 
   Map<String, RecordTemplate> getLatestAspectsForUrn(
       @Nonnull OperationContext opContext,
       @Nonnull final Urn urn,
-      @Nonnull final Set<String> aspectNames);
+      @Nonnull final Set<String> aspectNames,
+      boolean forUpdate);
 
   /**
    * Retrieves an aspect having a specific {@link Urn}, name, & version.
@@ -152,14 +199,27 @@ public interface EntityService<U extends ChangeMCP> {
    * @param entityName name of the entity to fetch
    * @param urn urn of entity to fetch
    * @param aspectNames set of aspects to fetch
+   * @param alwaysIncludeKeyAspect historically the key aspect was always added, allow disabling
+   *     this behavior
    * @return a map of {@link Urn} to {@link Entity} object
    */
   EntityResponse getEntityV2(
       @Nonnull OperationContext opContext,
       @Nonnull final String entityName,
       @Nonnull final Urn urn,
-      @Nonnull final Set<String> aspectNames)
+      @Nonnull final Set<String> aspectNames,
+      boolean alwaysIncludeKeyAspect)
       throws URISyntaxException;
+
+  @Deprecated
+  default EntityResponse getEntityV2(
+      @Nonnull OperationContext opContext,
+      @Nonnull final String entityName,
+      @Nonnull final Urn urn,
+      @Nonnull final Set<String> aspectNames)
+      throws URISyntaxException {
+    return getEntityV2(opContext, entityName, urn, aspectNames, true);
+  }
 
   /**
    * Retrieves the latest aspects for the given set of urns as dynamic aspect objects (Without
@@ -168,14 +228,26 @@ public interface EntityService<U extends ChangeMCP> {
    * @param entityName name of the entity to fetch
    * @param urns set of urns to fetch
    * @param aspectNames set of aspects to fetch
+   * @param alwaysIncludeKeyAspect historically the key aspect was always added, allow disabling
+   *     this behavior
    * @return a map of {@link Urn} to {@link Entity} object
    */
   Map<Urn, EntityResponse> getEntitiesV2(
       @Nonnull OperationContext opContext,
       @Nonnull final String entityName,
       @Nonnull final Set<Urn> urns,
-      @Nonnull final Set<String> aspectNames)
+      @Nonnull final Set<String> aspectNames,
+      boolean alwaysIncludeKeyAspect)
       throws URISyntaxException;
+
+  default Map<Urn, EntityResponse> getEntitiesV2(
+      @Nonnull OperationContext opContext,
+      @Nonnull final String entityName,
+      @Nonnull final Set<Urn> urns,
+      @Nonnull final Set<String> aspectNames)
+      throws URISyntaxException {
+    return getEntitiesV2(opContext, entityName, urns, aspectNames, true);
+  }
 
   /**
    * Retrieves the aspects for the given set of urns and versions as dynamic aspect objects (Without
@@ -184,24 +256,63 @@ public interface EntityService<U extends ChangeMCP> {
    * @param versionedUrns set of urns to fetch with versions of aspects specified in a specialized
    *     string
    * @param aspectNames set of aspects to fetch
+   * @param alwaysIncludeKeyAspect historically the key aspect was always added, allow disabling
+   *     this behavior
    * @return a map of {@link Urn} to {@link Entity} object
    */
   Map<Urn, EntityResponse> getEntitiesVersionedV2(
       @Nonnull OperationContext opContext,
       @Nonnull final Set<VersionedUrn> versionedUrns,
-      @Nonnull final Set<String> aspectNames)
+      @Nonnull final Set<String> aspectNames,
+      boolean alwaysIncludeKeyAspect)
       throws URISyntaxException;
+
+  @Deprecated
+  default Map<Urn, EntityResponse> getEntitiesVersionedV2(
+      @Nonnull OperationContext opContext,
+      @Nonnull final Set<VersionedUrn> versionedUrns,
+      @Nonnull final Set<String> aspectNames)
+      throws URISyntaxException {
+    return getEntitiesVersionedV2(opContext, versionedUrns, aspectNames, true);
+  }
 
   /**
    * Retrieves the latest aspects for the given set of urns as a list of enveloped aspects
    *
    * @param urns set of urns to fetch
    * @param aspectNames set of aspects to fetch
+   * @param alwaysIncludeKeyAspect historically the key aspect was always added, allow disabling
+   *     this behavior
    * @return a map of {@link Urn} to {@link EnvelopedAspect} object
    */
   Map<Urn, List<EnvelopedAspect>> getLatestEnvelopedAspects(
-      @Nonnull OperationContext opContext, @Nonnull Set<Urn> urns, @Nonnull Set<String> aspectNames)
+      @Nonnull OperationContext opContext,
+      @Nonnull Set<Urn> urns,
+      @Nonnull Set<String> aspectNames,
+      boolean alwaysIncludeKeyAspect)
       throws URISyntaxException;
+
+  /**
+   * Retrieve the specified aspect versions for the given URNs
+   *
+   * @param opContext operation context
+   * @param urnAspectVersions map of the urn's aspect versions
+   * @param alwaysIncludeKeyAspect whether to include the key aspect
+   * @return enveloped aspects with the specific version
+   * @throws URISyntaxException
+   */
+  Map<Urn, List<EnvelopedAspect>> getEnvelopedVersionedAspects(
+      @Nonnull OperationContext opContext,
+      @Nonnull Map<Urn, Map<String, Long>> urnAspectVersions,
+      boolean alwaysIncludeKeyAspect)
+      throws URISyntaxException;
+
+  @Deprecated
+  default Map<Urn, List<EnvelopedAspect>> getLatestEnvelopedAspects(
+      @Nonnull OperationContext opContext, @Nonnull Set<Urn> urns, @Nonnull Set<String> aspectNames)
+      throws URISyntaxException {
+    return getLatestEnvelopedAspects(opContext, urns, aspectNames, true);
+  }
 
   /**
    * Retrieves the latest aspects for the given set of urns as a list of enveloped aspects
@@ -209,13 +320,25 @@ public interface EntityService<U extends ChangeMCP> {
    * @param versionedUrns set of urns to fetch with versions of aspects specified in a specialized
    *     string
    * @param aspectNames set of aspects to fetch
+   * @param alwaysIncludeKeyAspect historically the key aspect was always added, allow disabling
+   *     this behavior
    * @return a map of {@link Urn} to {@link EnvelopedAspect} object
    */
   Map<Urn, List<EnvelopedAspect>> getVersionedEnvelopedAspects(
       @Nonnull OperationContext opContext,
       @Nonnull Set<VersionedUrn> versionedUrns,
-      @Nonnull Set<String> aspectNames)
+      @Nonnull Set<String> aspectNames,
+      boolean alwaysIncludeKeyAspect)
       throws URISyntaxException;
+
+  @Deprecated
+  default Map<Urn, List<EnvelopedAspect>> getVersionedEnvelopedAspects(
+      @Nonnull OperationContext opContext,
+      @Nonnull Set<VersionedUrn> versionedUrns,
+      @Nonnull Set<String> aspectNames)
+      throws URISyntaxException {
+    return getVersionedEnvelopedAspects(opContext, versionedUrns, aspectNames, true);
+  }
 
   /**
    * Retrieves the latest aspect for the given urn as a list of enveloped aspects
@@ -275,7 +398,9 @@ public interface EntityService<U extends ChangeMCP> {
    * @param auditStamp an {@link AuditStamp} containing metadata about the writer & current time
    * @param systemMetadata
    * @return the {@link RecordTemplate} representation of the written aspect object
+   * @deprecated See Conditional Write ChangeType CREATE
    */
+  @Deprecated
   RecordTemplate ingestAspectIfNotPresent(
       @Nonnull OperationContext opContext,
       @Nonnull Urn urn,
@@ -320,19 +445,53 @@ public interface EntityService<U extends ChangeMCP> {
   Entity getEntity(
       @Nonnull OperationContext opContext,
       @Nonnull final Urn urn,
-      @Nonnull final Set<String> aspectNames);
+      @Nonnull final Set<String> aspectNames,
+      boolean alwaysIncludeKeyAspect);
 
   @Deprecated
   Map<Urn, Entity> getEntities(
       @Nonnull OperationContext opContext,
       @Nonnull final Set<Urn> urns,
-      @Nonnull Set<String> aspectNames);
+      @Nonnull Set<String> aspectNames,
+      boolean alwaysIncludeKeyAspect);
 
   Pair<Future<?>, Boolean> alwaysProduceMCLAsync(
       @Nonnull OperationContext opContext,
       @Nonnull final Urn urn,
       AspectSpec aspectSpec,
       @Nonnull final MetadataChangeLog metadataChangeLog);
+
+  /**
+   * Generally should not be necessary, created for delete flow which does not have System Metadata,
+   * so it lacks a way to force through index updates synchronously.
+   *
+   * @param opContext the current operation context
+   * @param urn urn to produce event for
+   * @param aspectSpec aspect of the entity
+   * @param metadataChangeLog the MCL to produce
+   * @return list of the mcl produce future along with a boolean indicating if the event was
+   *     pre-processed
+   */
+  Pair<Future<?>, Boolean> alwaysProduceMCLAsync(
+      @Nonnull OperationContext opContext,
+      @Nonnull final Urn urn,
+      AspectSpec aspectSpec,
+      @Nonnull final MetadataChangeLog metadataChangeLog,
+      boolean forcePreProcessHooks);
+
+  Pair<Future<?>, Boolean> alwaysProduceMCLAsync(
+      @Nonnull OperationContext opContext,
+      @Nonnull final Urn urn,
+      @Nonnull String entityName,
+      @Nonnull String aspectName,
+      @Nullable final AspectSpec aspectSpec,
+      @Nullable final RecordTemplate oldAspectValue,
+      @Nullable final RecordTemplate newAspectValue,
+      @Nullable final SystemMetadata oldSystemMetadata,
+      @Nullable final SystemMetadata newSystemMetadata,
+      @Nonnull AuditStamp auditStamp,
+      @Nonnull final ChangeType changeType,
+      boolean forcePreProcessHooks);
 
   Pair<Future<?>, Boolean> alwaysProduceMCLAsync(
       @Nonnull OperationContext opContext,
@@ -369,12 +528,30 @@ public interface EntityService<U extends ChangeMCP> {
 
   void setRetentionService(RetentionService<U> retentionService);
 
-  RollbackResult deleteAspect(
+  default Optional<RollbackResult> deleteAspect(
       @Nonnull OperationContext opContext,
       String urn,
       String aspectName,
       @Nonnull Map<String, String> conditions,
-      boolean hardDelete);
+      boolean hardDelete) {
+    return deleteAspect(opContext, urn, aspectName, conditions, hardDelete, false);
+  }
+
+  default Optional<RollbackResult> deleteAspect(
+      @Nonnull OperationContext opContext,
+      String urn,
+      String aspectName,
+      @Nonnull Map<String, String> conditions,
+      boolean hardDelete,
+      boolean preProcessHooks) {
+    AspectRowSummary aspectRowSummary =
+        new AspectRowSummary().setUrn(urn).setAspectName(aspectName);
+    return rollbackWithConditions(
+            opContext, List.of(aspectRowSummary), conditions, hardDelete, preProcessHooks)
+        .getRollbackResults()
+        .stream()
+        .findFirst();
+  }
 
   RollbackRunResult deleteUrn(@Nonnull OperationContext opContext, Urn urn);
 
@@ -388,9 +565,10 @@ public interface EntityService<U extends ChangeMCP> {
       @Nonnull OperationContext opContext,
       List<AspectRowSummary> aspectRows,
       Map<String, String> conditions,
-      boolean hardDelete);
+      boolean hardDelete,
+      boolean preProcessHooks);
 
-  Set<IngestResult> ingestProposal(
+  List<IngestResult> ingestProposal(
       @Nonnull OperationContext opContext, AspectsBatch aspectsBatch, final boolean async);
 
   /**

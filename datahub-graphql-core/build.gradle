@@ -3,6 +3,7 @@ plugins {
     id "io.github.kobylynskyi.graphql.codegen" version "4.1.1"
 }
 
+apply from: '../gradle/coverage/java-coverage.gradle'
 
 dependencies {
     implementation project(':metadata-service:restli-client-api')
@@ -22,6 +23,7 @@ dependencies {
     implementation externalDependency.opentelemetryAnnotations
 
     implementation externalDependency.slf4jApi
+    implementation externalDependency.springContext
     compileOnly externalDependency.lombok
     annotationProcessor externalDependency.lombok
 

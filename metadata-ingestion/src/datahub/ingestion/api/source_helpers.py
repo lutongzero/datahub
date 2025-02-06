@@ -1,8 +1,6 @@
 import logging
-from datetime import datetime, timezone
 from typing import (
     TYPE_CHECKING,
-    Callable,
     Dict,
     Iterable,
     List,
@@ -15,7 +13,7 @@ from typing import (
 )
 
 from datahub.configuration.time_window_config import BaseTimeWindowConfig
-from datahub.emitter.mce_builder import make_dataplatform_instance_urn
+from datahub.emitter.mce_builder import make_dataplatform_instance_urn, parse_ts_millis
 from datahub.emitter.mcp import MetadataChangeProposalWrapper
 from datahub.emitter.mcp_builder import entity_supports_aspect
 from datahub.ingestion.api.workunit import MetadataWorkUnit
@@ -33,25 +31,24 @@ from datahub.metadata.schema_classes import (
     SchemaFieldClass,
     SchemaMetadataClass,
     StatusClass,
+    SystemMetadataClass,
     TimeWindowSizeClass,
 )
 from datahub.metadata.urns import DatasetUrn, GlossaryTermUrn, TagUrn, Urn
 from datahub.specific.dataset import DatasetPatchBuilder
 from datahub.telemetry import telemetry
+from datahub.utilities.urns.error import InvalidUrnError
 from datahub.utilities.urns.urn import guess_entity_type
 from datahub.utilities.urns.urn_iter import list_urns, lowercase_dataset_urns
 
 if TYPE_CHECKING:
     from datahub.ingestion.api.source import SourceReport
-    from datahub.ingestion.source.state.stale_entity_removal_handler import (
-        StaleEntityRemovalHandler,
-    )
 
 logger = logging.getLogger(__name__)
 
 
 def auto_workunit(
-    stream: Iterable[Union[MetadataChangeEventClass, MetadataChangeProposalWrapper]]
+    stream: Iterable[Union[MetadataChangeEventClass, MetadataChangeProposalWrapper]],
 ) -> Iterable[MetadataWorkUnit]:
     """Convert a stream of MCEs and MCPs to a stream of :class:`MetadataWorkUnit`s."""
 
@@ -68,9 +65,10 @@ def auto_workunit(
 def create_dataset_props_patch_builder(
     dataset_urn: str,
     dataset_properties: DatasetPropertiesClass,
+    system_metadata: Optional[SystemMetadataClass] = None,
 ) -> DatasetPatchBuilder:
     """Creates a patch builder with a table's or view's attributes and dataset properties"""
-    patch_builder = DatasetPatchBuilder(dataset_urn)
+    patch_builder = DatasetPatchBuilder(dataset_urn, system_metadata)
     patch_builder.set_display_name(dataset_properties.name)
     patch_builder.set_description(dataset_properties.description)
     patch_builder.set_created(dataset_properties.created)
@@ -102,7 +100,6 @@ def auto_status_aspect(
     """
     all_urns: Set[str] = set()
     status_urns: Set[str] = set()
-    skip_urns: Set[str] = set()
     for wu in stream:
         urn = wu.get_urn()
         all_urns.add(urn)
@@ -127,51 +124,17 @@ def auto_status_aspect(
 
         yield wu
 
-    for urn in sorted(all_urns - status_urns - skip_urns):
+    for urn in sorted(all_urns - status_urns):
         entity_type = guess_entity_type(urn)
         if not entity_supports_aspect(entity_type, StatusClass):
             # If any entity does not support aspect 'status' then skip that entity from adding status aspect.
             # Example like dataProcessInstance doesn't suppport status aspect.
             # If not skipped gives error: java.lang.RuntimeException: Unknown aspect status for entity dataProcessInstance
             continue
-
         yield MetadataChangeProposalWrapper(
             entityUrn=urn,
             aspect=StatusClass(removed=False),
         ).as_workunit()
-
-
-def _default_entity_type_fn(wu: MetadataWorkUnit) -> Optional[str]:
-    urn = wu.get_urn()
-    entity_type = guess_entity_type(urn)
-    return entity_type
-
-
-def auto_stale_entity_removal(
-    stale_entity_removal_handler: "StaleEntityRemovalHandler",
-    stream: Iterable[MetadataWorkUnit],
-    entity_type_fn: Callable[
-        [MetadataWorkUnit], Optional[str]
-    ] = _default_entity_type_fn,
-) -> Iterable[MetadataWorkUnit]:
-    """
-    Record all entities that are found, and emit removals for any that disappeared in this run.
-    """
-
-    for wu in stream:
-        urn = wu.get_urn()
-
-        if wu.is_primary_source:
-            entity_type = entity_type_fn(wu)
-            if entity_type is not None:
-                stale_entity_removal_handler.add_entity_to_state(entity_type, urn)
-        else:
-            stale_entity_removal_handler.add_urn_to_skip(urn)
-
-        yield wu
-
-    # Clean up stale entities.
-    yield from stale_entity_removal_handler.gen_removed_entity_workunits()
 
 
 T = TypeVar("T", bound=MetadataWorkUnit)
@@ -185,6 +148,12 @@ def auto_workunit_reporter(report: "SourceReport", stream: Iterable[T]) -> Itera
     for wu in stream:
         report.report_workunit(wu)
         yield wu
+
+    if report.event_not_produced_warn and report.events_produced == 0:
+        report.warning(
+            title="No metadata was produced by the source",
+            message="Please check the source configuration, filters, and permissions.",
+        )
 
 
 def auto_materialize_referenced_tags_terms(
@@ -211,13 +180,18 @@ def auto_materialize_referenced_tags_terms(
         yield wu
 
     for urn in sorted(referenced_tags - tags_with_aspects):
-        urn_tp = Urn.from_string(urn)
-        assert isinstance(urn_tp, (TagUrn, GlossaryTermUrn))
+        try:
+            urn_tp = Urn.from_string(urn)
+            assert isinstance(urn_tp, (TagUrn, GlossaryTermUrn))
 
-        yield MetadataChangeProposalWrapper(
-            entityUrn=urn,
-            aspect=urn_tp.to_key_aspect(),
-        ).as_workunit()
+            yield MetadataChangeProposalWrapper(
+                entityUrn=urn,
+                aspect=urn_tp.to_key_aspect(),
+            ).as_workunit()
+        except InvalidUrnError:
+            logger.info(
+                f"Source produced an invalid urn, so no key aspect will be generated: {urn}"
+            )
 
 
 def auto_lowercase_urns(
@@ -427,6 +401,50 @@ def auto_fix_duplicate_schema_field_paths(
         )
 
 
+def auto_fix_empty_field_paths(
+    stream: Iterable[MetadataWorkUnit],
+    *,
+    platform: Optional[str] = None,
+) -> Iterable[MetadataWorkUnit]:
+    """Count schema metadata aspects with empty field paths and emit telemetry."""
+
+    total_schema_aspects = 0
+    schemas_with_empty_fields = 0
+    empty_field_paths = 0
+
+    for wu in stream:
+        schema_metadata = wu.get_aspect_of_type(SchemaMetadataClass)
+        if schema_metadata:
+            total_schema_aspects += 1
+
+            updated_fields: List[SchemaFieldClass] = []
+            for field in schema_metadata.fields:
+                if field.fieldPath:
+                    updated_fields.append(field)
+                else:
+                    empty_field_paths += 1
+
+            if empty_field_paths > 0:
+                logger.info(
+                    f"Fixing empty field paths in schema aspect for {wu.get_urn()} by dropping empty fields"
+                )
+                schema_metadata.fields = updated_fields
+                schemas_with_empty_fields += 1
+
+        yield wu
+
+    if schemas_with_empty_fields > 0:
+        properties = {
+            "platform": platform,
+            "total_schema_aspects": total_schema_aspects,
+            "schemas_with_empty_fields": schemas_with_empty_fields,
+            "empty_field_paths": empty_field_paths,
+        }
+        telemetry.telemetry_instance.ping(
+            "ingestion_empty_schema_field_paths", properties
+        )
+
+
 def auto_empty_dataset_usage_statistics(
     stream: Iterable[MetadataWorkUnit],
     *,
@@ -460,10 +478,7 @@ def auto_empty_dataset_usage_statistics(
     if invalid_timestamps:
         logger.warning(
             f"Usage statistics with unexpected timestamps, bucket_duration={config.bucket_duration}:\n"
-            ", ".join(
-                str(datetime.fromtimestamp(ts / 1000, tz=timezone.utc))
-                for ts in invalid_timestamps
-            )
+            ", ".join(str(parse_ts_millis(ts)) for ts in invalid_timestamps)
         )
 
     for bucket in bucket_timestamps:

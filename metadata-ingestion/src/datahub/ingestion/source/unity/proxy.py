@@ -4,7 +4,7 @@ Manage the communication with DataBricks Server and provide equivalent dataclass
 
 import dataclasses
 import logging
-from datetime import datetime, timezone
+from datetime import datetime
 from typing import Any, Dict, Iterable, List, Optional, Union, cast
 from unittest.mock import patch
 
@@ -26,7 +26,8 @@ from databricks.sdk.service.sql import (
 )
 from databricks.sdk.service.workspace import ObjectType
 
-import datahub
+from datahub._version import nice_version_name
+from datahub.emitter.mce_builder import parse_ts_millis
 from datahub.ingestion.source.unity.hive_metastore_proxy import HiveMetastoreProxy
 from datahub.ingestion.source.unity.proxy_profiling import (
     UnityCatalogProxyProfilingMixin,
@@ -102,14 +103,14 @@ class UnityCatalogApiProxy(UnityCatalogProxyProfilingMixin):
             host=workspace_url,
             token=personal_access_token,
             product="datahub",
-            product_version=datahub.nice_version_name(),
+            product_version=nice_version_name(),
         )
         self.warehouse_id = warehouse_id or ""
         self.report = report
         self.hive_metastore_proxy = hive_metastore_proxy
 
     def check_basic_connectivity(self) -> bool:
-        return bool(self._workspace_client.catalogs.list())
+        return bool(self._workspace_client.catalogs.list(include_browse=True))
 
     def assigned_metastore(self) -> Optional[Metastore]:
         response = self._workspace_client.metastores.summary()
@@ -119,10 +120,10 @@ class UnityCatalogApiProxy(UnityCatalogProxyProfilingMixin):
         if self.hive_metastore_proxy:
             yield self.hive_metastore_proxy.hive_metastore_catalog(metastore)
 
-        response = self._workspace_client.catalogs.list()
+        response = self._workspace_client.catalogs.list(include_browse=True)
         if not response:
             logger.info("Catalogs not found")
-            return []
+            return
         for catalog in response:
             optional_catalog = self._create_catalog(metastore, catalog)
             if optional_catalog:
@@ -131,7 +132,9 @@ class UnityCatalogApiProxy(UnityCatalogProxyProfilingMixin):
     def catalog(
         self, catalog_name: str, metastore: Optional[Metastore]
     ) -> Optional[Catalog]:
-        response = self._workspace_client.catalogs.get(catalog_name)
+        response = self._workspace_client.catalogs.get(
+            catalog_name, include_browse=True
+        )
         if not response:
             logger.info(f"Catalog {catalog_name} not found")
             return None
@@ -148,10 +151,12 @@ class UnityCatalogApiProxy(UnityCatalogProxyProfilingMixin):
         ):
             yield from self.hive_metastore_proxy.hive_metastore_schemas(catalog)
             return
-        response = self._workspace_client.schemas.list(catalog_name=catalog.name)
+        response = self._workspace_client.schemas.list(
+            catalog_name=catalog.name, include_browse=True
+        )
         if not response:
             logger.info(f"Schemas not found for catalog {catalog.id}")
-            return []
+            return
         for schema in response:
             optional_schema = self._create_schema(catalog, schema)
             if optional_schema:
@@ -166,11 +171,13 @@ class UnityCatalogApiProxy(UnityCatalogProxyProfilingMixin):
             return
         with patch("databricks.sdk.service.catalog.TableInfo", TableInfoWithGeneration):
             response = self._workspace_client.tables.list(
-                catalog_name=schema.catalog.name, schema_name=schema.name
+                catalog_name=schema.catalog.name,
+                schema_name=schema.name,
+                include_browse=True,
             )
             if not response:
                 logger.info(f"Tables not found for schema {schema.id}")
-                return []
+                return
             for table in response:
                 try:
                     optional_table = self._create_table(
@@ -205,16 +212,8 @@ class UnityCatalogApiProxy(UnityCatalogProxyProfilingMixin):
                     id=obj.object_id,
                     path=obj.path,
                     language=obj.language,
-                    created_at=(
-                        datetime.fromtimestamp(obj.created_at / 1000, tz=timezone.utc)
-                        if obj.created_at
-                        else None
-                    ),
-                    modified_at=(
-                        datetime.fromtimestamp(obj.modified_at / 1000, tz=timezone.utc)
-                        if obj.modified_at
-                        else None
-                    ),
+                    created_at=parse_ts_millis(obj.created_at),
+                    modified_at=parse_ts_millis(obj.modified_at),
                 )
 
     def query_history(
@@ -364,7 +363,7 @@ class UnityCatalogApiProxy(UnityCatalogProxyProfilingMixin):
 
     @staticmethod
     def _create_metastore(
-        obj: Union[GetMetastoreSummaryResponse, MetastoreInfo]
+        obj: Union[GetMetastoreSummaryResponse, MetastoreInfo],
     ) -> Optional[Metastore]:
         if not obj.name:
             return None
@@ -446,19 +445,9 @@ class UnityCatalogApiProxy(UnityCatalogProxyProfilingMixin):
             properties=obj.properties or {},
             owner=obj.owner,
             generation=obj.generation,
-            created_at=(
-                datetime.fromtimestamp(obj.created_at / 1000, tz=timezone.utc)
-                if obj.created_at
-                else None
-            ),
+            created_at=(parse_ts_millis(obj.created_at) if obj.created_at else None),
             created_by=obj.created_by,
-            updated_at=(
-                datetime.fromtimestamp(obj.updated_at / 1000, tz=timezone.utc)
-                if obj.updated_at
-                else None
-                if obj.updated_at
-                else None
-            ),
+            updated_at=(parse_ts_millis(obj.updated_at) if obj.updated_at else None),
             updated_by=obj.updated_by,
             table_id=obj.table_id,
             comment=obj.comment,
@@ -496,12 +485,8 @@ class UnityCatalogApiProxy(UnityCatalogProxyProfilingMixin):
             query_id=info.query_id,
             query_text=info.query_text,
             statement_type=info.statement_type,
-            start_time=datetime.fromtimestamp(
-                info.query_start_time_ms / 1000, tz=timezone.utc
-            ),
-            end_time=datetime.fromtimestamp(
-                info.query_end_time_ms / 1000, tz=timezone.utc
-            ),
+            start_time=parse_ts_millis(info.query_start_time_ms),
+            end_time=parse_ts_millis(info.query_end_time_ms),
             user_id=info.user_id,
             user_name=info.user_name,
             executed_as_user_id=info.executed_as_user_id,

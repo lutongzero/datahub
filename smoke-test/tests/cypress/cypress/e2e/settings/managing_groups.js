@@ -1,4 +1,4 @@
-const test_id = Math.floor(Math.random() * 100000);
+const test_id = crypto.getRandomValues(new Uint32Array(1))[0];
 const username = `Example Name ${test_id}`;
 const email = `example${test_id}@example.com`;
 const password = "Example password";
@@ -22,7 +22,7 @@ describe("create and manage group", () => {
       cy.mouseover("#title").click();
       cy.waitTextVisible("Other").click();
       cy.get("[type=submit]").click();
-      cy.waitTextVisible("Welcome to DataHub");
+      cy.waitTextVisible("Welcome back");
       cy.hideOnboardingTour();
       cy.waitTextVisible(username);
     });

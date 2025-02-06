@@ -81,16 +81,21 @@ public class TemplateUtil {
           PatchOperationType.REMOVE.equals(operationPath.getFirst())
               ? keys.length
               : keys.length - 1;
-
       // Skip first as it will always be blank due to path starting with /
       for (int i = 1; i < endIdx; i++) {
-        if (parent.get(keys[i]) == null) {
-          ((ObjectNode) parent).set(keys[i], instance.objectNode());
+        String decodedKey = decodeValue(keys[i]);
+        if (parent.get(decodedKey) == null) {
+          ((ObjectNode) parent).set(decodedKey, instance.objectNode());
         }
-        parent = parent.get(keys[i]);
+        parent = parent.get(decodedKey);
       }
     }
 
     return transformedNodeClone;
+  }
+
+  /** Simply decode a JSON-patch encoded value * */
+  private static String decodeValue(String value) {
+    return value.replace("~1", "/").replace("~0", "~");
   }
 }

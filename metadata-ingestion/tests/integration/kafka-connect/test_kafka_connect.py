@@ -333,6 +333,30 @@ def loaded_kafka_connect(kafka_connect_runner):
     r.raise_for_status()
     assert r.status_code == 201
 
+    # Creating BigQuery sink connector
+    r = requests.post(
+        KAFKA_CONNECT_ENDPOINT,
+        headers={"Content-Type": "application/json"},
+        data="""{
+            "name": "bigquery-sink-connector",
+            "config": {
+                "connector.class": "com.wepay.kafka.connect.bigquery.BigQuerySinkConnector",
+                "autoCreateTables": "true",
+                "transforms.TableNameTransformation.type": "org.apache.kafka.connect.transforms.RegexRouter",
+                "transforms.TableNameTransformation.replacement": "my_dest_table_name",
+                "topics": "kafka-topic-name",
+                "transforms.TableNameTransformation.regex": ".*",
+                "transforms": "TableNameTransformation",
+                "name": "bigquery-sink-connector",
+                "project": "my-gcp-project",
+                "defaultDataset": "mybqdataset",
+                "datasets": "kafka-topic-name=mybqdataset"
+            }
+        }
+        """,
+    )
+    assert r.status_code == 201  # Created
+
     # Give time for connectors to process the table data
     kafka_connect_runner.wait_until_responsive(
         timeout=30,
@@ -458,9 +482,9 @@ def test_kafka_connect_ingest_stateful(
             "mysql_source1",
             "mysql_source2",
         ]
-        pipeline_run1_config["sink"]["config"][
-            "filename"
-        ] = f"{tmp_path}/{output_file_name}"
+        pipeline_run1_config["sink"]["config"]["filename"] = (
+            f"{tmp_path}/{output_file_name}"
+        )
         pipeline_run1 = Pipeline.create(pipeline_run1_config)
         pipeline_run1.run()
         pipeline_run1.raise_from_status()
@@ -482,14 +506,16 @@ def test_kafka_connect_ingest_stateful(
         mock_datahub_graph,
     ) as mock_checkpoint:
         mock_checkpoint.return_value = mock_datahub_graph
-        pipeline_run2_config: Dict[str, Dict[str, Dict[str, Any]]] = dict(base_pipeline_config)  # type: ignore
+        pipeline_run2_config: Dict[str, Dict[str, Dict[str, Any]]] = dict(
+            base_pipeline_config  # type: ignore
+        )
         # Set the special properties for this run
         pipeline_run1_config["source"]["config"]["connector_patterns"]["allow"] = [
             "mysql_source1",
         ]
-        pipeline_run2_config["sink"]["config"][
-            "filename"
-        ] = f"{tmp_path}/{output_file_deleted_name}"
+        pipeline_run2_config["sink"]["config"]["filename"] = (
+            f"{tmp_path}/{output_file_deleted_name}"
+        )
         pipeline_run2 = Pipeline.create(pipeline_run2_config)
         pipeline_run2.run()
         pipeline_run2.raise_from_status()
@@ -636,4 +662,23 @@ def test_kafka_connect_snowflake_sink_ingest(
         pytestconfig,
         output_path=tmp_path / "kafka_connect_snowflake_sink_mces.json",
         golden_path=f"{test_resources_dir}/{golden_file}",
+    )
+
+
+@freeze_time(FROZEN_TIME)
+def test_kafka_connect_bigquery_sink_ingest(
+    loaded_kafka_connect, pytestconfig, tmp_path, test_resources_dir
+):
+    # Run the metadata ingestion pipeline.
+    config_file = (
+        test_resources_dir / "kafka_connect_bigquery_sink_to_file.yml"
+    ).resolve()
+    run_datahub_cmd(["ingest", "-c", f"{config_file}"], tmp_path=tmp_path)
+
+    # Verify the output.
+    mce_helpers.check_golden_file(
+        pytestconfig,
+        output_path=tmp_path / "kafka_connect_mces.json",
+        golden_path=test_resources_dir / "kafka_connect_bigquery_sink_mces_golden.json",
+        ignore_paths=[],
     )

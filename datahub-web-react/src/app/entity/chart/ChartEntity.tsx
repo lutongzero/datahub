@@ -28,6 +28,8 @@ import { LOOKER_URN } from '../../ingest/source/builder/constants';
 import { MatchedFieldList } from '../../search/matches/MatchedFieldList';
 import { matchedInputFieldRenderer } from '../../search/matches/matchedInputFieldRenderer';
 import { IncidentTab } from '../shared/tabs/Incident/IncidentTab';
+import { ChartQueryTab } from './ChartQueryTab';
+import SidebarStructuredPropsSection from '../shared/containers/profile/sidebar/StructuredProperties/SidebarStructuredPropsSection';
 
 /**
  * Definition of the DataHub Chart entity.
@@ -68,6 +70,8 @@ export class ChartEntity implements Entity<Chart> {
 
     getAutoCompleteFieldName = () => 'title';
 
+    getGraphName = () => 'chart';
+
     getPathName = () => 'chart';
 
     getEntityName = () => 'Chart';
@@ -96,6 +100,9 @@ export class ChartEntity implements Entity<Chart> {
         {
             component: DataProductSection,
         },
+        {
+            component: SidebarStructuredPropsSection,
+        },
     ];
 
     renderProfile = (urn: string) => (
@@ -110,6 +117,14 @@ export class ChartEntity implements Entity<Chart> {
                 component: ChartStatsSummarySubHeader,
             }}
             tabs={[
+                {
+                    name: 'Query',
+                    component: ChartQueryTab,
+                    display: {
+                        visible: (_, chart: GetChartQuery) => (chart?.chart?.query?.rawQuery && true) || false,
+                        enabled: (_, chart: GetChartQuery) => (chart?.chart?.query?.rawQuery && true) || false,
+                    },
+                },
                 {
                     name: 'Documentation',
                     component: DocumentationTab,
@@ -127,9 +142,9 @@ export class ChartEntity implements Entity<Chart> {
                     component: EmbedTab,
                     display: {
                         visible: (_, chart: GetChartQuery) =>
-                            !!chart?.chart?.embed?.renderUrl && chart?.chart?.platform.urn === LOOKER_URN,
+                            !!chart?.chart?.embed?.renderUrl && chart?.chart?.platform?.urn === LOOKER_URN,
                         enabled: (_, chart: GetChartQuery) =>
-                            !!chart?.chart?.embed?.renderUrl && chart?.chart?.platform.urn === LOOKER_URN,
+                            !!chart?.chart?.embed?.renderUrl && chart?.chart?.platform?.urn === LOOKER_URN,
                     },
                 },
                 {
@@ -155,7 +170,7 @@ export class ChartEntity implements Entity<Chart> {
                     name: 'Incidents',
                     component: IncidentTab,
                     getDynamicName: (_, chart) => {
-                        const activeIncidentCount = chart?.chart?.activeIncidents.total;
+                        const activeIncidentCount = chart?.chart?.activeIncidents?.total;
                         return `Incidents${(activeIncidentCount && ` (${activeIncidentCount})`) || ''}`;
                     },
                 },

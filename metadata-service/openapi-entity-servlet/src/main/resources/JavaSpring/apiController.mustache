@@ -80,7 +80,7 @@ import java.util.concurrent.Callable;
 {{/useOas2}}
 {{#operations}}
 @RestController
-@RequestMapping("/v2/entity")
+@RequestMapping("/openapi/v2/entity")
 public class {{classname}}Controller implements {{classname}} {
 
     private static final Logger log = LoggerFactory.getLogger({{classname}}Controller.class);
@@ -98,7 +98,7 @@ public class {{classname}}Controller implements {{classname}} {
     SearchService searchService, EntitiesController v1Controller, AuthorizerChain authorizationChain) {
         this.objectMapper = objectMapper;
         this.request = request;
-        this.delegate = new EntityApiDelegateImpl<{{requestClass}}, {{responseClass}}, {{scrollResponseClass}}>(systemOperationContext, entityService, searchService, v1Controller,
+        this.delegate = new EntityApiDelegateImpl<{{requestClass}}, {{responseClass}}, {{scrollResponseClass}}>(systemOperationContext, request, entityService, searchService, v1Controller,
         authorizationChain, {{requestClass}}.class, {{responseClass}}.class, {{scrollResponseClass}}.class);
     }
     {{#isJava8or11}}

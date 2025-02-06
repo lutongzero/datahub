@@ -41,14 +41,23 @@ export const PropertiesTab = () => {
         propertyTableColumns.push({
             title: '',
             width: '10%',
-            render: (propertyRow: PropertyRow) => <EditColumn propertyRow={propertyRow} />,
+            render: (propertyRow: PropertyRow) => (
+                <EditColumn
+                    structuredProperty={propertyRow.structuredProperty}
+                    associatedUrn={propertyRow.associatedUrn}
+                    values={propertyRow.values?.map((v) => v.value) || []}
+                />
+            ),
         } as any);
     }
 
     const { structuredPropertyRows, expandedRowsFromFilter } = useStructuredProperties(entityRegistry, filterText);
+    const filteredStructuredPropertyRows = structuredPropertyRows.filter(
+        (row) => !row.structuredProperty?.settings?.isHidden,
+    );
     const customProperties = getFilteredCustomProperties(filterText, entityData) || [];
     const customPropertyRows = mapCustomPropertiesToPropertyRows(customProperties);
-    const dataSource: PropertyRow[] = structuredPropertyRows.concat(customPropertyRows);
+    const dataSource: PropertyRow[] = filteredStructuredPropertyRows.concat(customPropertyRows);
 
     const [expandedRows, setExpandedRows] = useState<Set<string>>(new Set());
 

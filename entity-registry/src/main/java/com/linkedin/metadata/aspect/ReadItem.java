@@ -5,6 +5,7 @@ import com.linkedin.data.DataMap;
 import com.linkedin.data.template.RecordTemplate;
 import com.linkedin.metadata.models.AspectSpec;
 import com.linkedin.metadata.models.EntitySpec;
+import com.linkedin.mxe.GenericAspect;
 import com.linkedin.mxe.SystemMetadata;
 import java.lang.reflect.InvocationTargetException;
 import javax.annotation.Nonnull;
@@ -26,12 +27,16 @@ public interface ReadItem {
    */
   @Nonnull
   default String getAspectName() {
+    if (getAspectSpec() == null) {
+      return GenericAspect.dataSchema().getName();
+    }
     return getAspectSpec().getName();
   }
 
   @Nullable
   RecordTemplate getRecordTemplate();
 
+  @Nullable
   default <T> T getAspect(Class<T> clazz) {
     return getAspect(clazz, getRecordTemplate());
   }
@@ -60,6 +65,13 @@ public interface ReadItem {
   SystemMetadata getSystemMetadata();
 
   /**
+   * Set system metadata on the item
+   *
+   * @param systemMetadata
+   */
+  void setSystemMetadata(@Nonnull SystemMetadata systemMetadata);
+
+  /**
    * The entity's schema
    *
    * @return entity specification
@@ -72,6 +84,6 @@ public interface ReadItem {
    *
    * @return aspect's specification
    */
-  @Nonnull
+  @Nullable
   AspectSpec getAspectSpec();
 }

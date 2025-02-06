@@ -12,13 +12,15 @@ import com.linkedin.timeseries.GroupingBucket;
 import com.linkedin.timeseries.TimeseriesIndexSizeResult;
 import io.datahubproject.metadata.context.OperationContext;
 import java.util.List;
+import java.util.Map;
+import java.util.Set;
 import javax.annotation.Nonnull;
 import javax.annotation.Nullable;
 
 public interface TimeseriesAspectService {
 
   /** Configure the Time-Series aspect service one time at boot-up. */
-  void configure();
+  default void configure() {}
 
   /**
    * Count the number of entries using a filter
@@ -115,6 +117,22 @@ public interface TimeseriesAspectService {
       @Nullable final Integer limit,
       @Nullable final Filter filter,
       @Nullable final SortCriterion sort);
+
+  /**
+   * Returns the latest value for the given URNs and aspects
+   *
+   * @param opContext operation context
+   * @param urns the urns
+   * @param aspectNames the aspects
+   * @param endTimeMillis fetch latest aspect before this time in milliseconds for each aspect
+   * @return Map of the urns
+   */
+  @Nonnull
+  Map<Urn, Map<String, EnvelopedAspect>> getLatestTimeseriesAspectValues(
+      @Nonnull OperationContext opContext,
+      @Nonnull final Set<Urn> urns,
+      @Nonnull final Set<String> aspectNames,
+      @Nullable final Map<String, Long> endTimeMillis);
 
   /**
    * Perform a arbitrary aggregation query over a set of Time-Series aspects. This is used to answer
@@ -226,7 +244,7 @@ public interface TimeseriesAspectService {
       @Nonnull final String entityName,
       @Nonnull final String aspectName,
       @Nullable Filter filter,
-      @Nonnull List<SortCriterion> sortCriterion,
+      @Nonnull List<SortCriterion> sortCriteria,
       @Nullable String scrollId,
       int count,
       @Nullable Long startTimeMillis,

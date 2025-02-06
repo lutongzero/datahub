@@ -1,13 +1,13 @@
+import analytics, { EventType } from '@src/app/analytics';
 import { Button, Modal, message } from 'antd';
-import React from 'react';
+import React, { useEffect, useMemo } from 'react';
 import styled from 'styled-components';
-import { PropertyRow } from '../types';
-import StructuredPropertyInput from '../../../components/styled/StructuredProperty/StructuredPropertyInput';
-import { PropertyValueInput, StructuredPropertyEntity } from '../../../../../../types.generated';
 import { useUpsertStructuredPropertiesMutation } from '../../../../../../graphql/structuredProperties.generated';
-import { useEditStructuredProperty } from '../../../components/styled/StructuredProperty/useEditStructuredProperty';
-import { useEntityContext, useMutationUrn } from '../../../EntityContext';
+import { EntityType, PropertyValueInput, StructuredPropertyEntity } from '../../../../../../types.generated';
 import handleGraphQLError from '../../../../../shared/handleGraphQLError';
+import StructuredPropertyInput from '../../../components/styled/StructuredProperty/StructuredPropertyInput';
+import { useEditStructuredProperty } from '../../../components/styled/StructuredProperty/useEditStructuredProperty';
+import { useEntityContext, useEntityData, useMutationUrn } from '../../../EntityContext';
 
 const Description = styled.div`
     font-size: 14px;
@@ -17,21 +17,44 @@ const Description = styled.div`
 
 interface Props {
     isOpen: boolean;
-    propertyRow: PropertyRow;
     structuredProperty: StructuredPropertyEntity;
+    associatedUrn?: string;
+    values?: (string | number | null)[];
     closeModal: () => void;
+    refetch?: () => void;
+    isAddMode?: boolean;
 }
 
-export default function EditStructuredPropertyModal({ isOpen, propertyRow, structuredProperty, closeModal }: Props) {
-    const { refetch } = useEntityContext();
-    const urn = useMutationUrn();
-    const initialValues = propertyRow.values?.map((v) => v.value) || [];
-    const { selectedValues, selectSingleValue, toggleSelectedValue, updateSelectedValues } =
+export default function EditStructuredPropertyModal({
+    isOpen,
+    structuredProperty,
+    associatedUrn,
+    values,
+    closeModal,
+    refetch,
+    isAddMode,
+}: Props) {
+    const { refetch: entityRefetch } = useEntityContext();
+    const mutationUrn = useMutationUrn();
+    const { entityType } = useEntityData();
+    const urn = associatedUrn || mutationUrn;
+    const initialValues = useMemo(() => values || [], [values]);
+    const { selectedValues, selectSingleValue, toggleSelectedValue, updateSelectedValues, setSelectedValues } =
         useEditStructuredProperty(initialValues);
     const [upsertStructuredProperties] = useUpsertStructuredPropertiesMutation();
 
+    useEffect(() => {
+        setSelectedValues(initialValues);
+    }, [isOpen, initialValues, setSelectedValues]);
+
     function upsertProperties() {
-        message.loading('Updating...');
+        message.loading(isAddMode ? 'Adding...' : 'Updating...');
+        const propValues = selectedValues.map((value) => {
+            if (typeof value === 'string') {
+                return { stringValue: value as string };
+            }
+            return { numberValue: value as number };
+        }) as PropertyValueInput[];
         upsertStructuredProperties({
             variables: {
                 input: {
@@ -39,21 +62,30 @@ export default function EditStructuredPropertyModal({ isOpen, propertyRow, struc
                     structuredPropertyInputParams: [
                         {
                             structuredPropertyUrn: structuredProperty.urn,
-                            values: selectedValues.map((value) => {
-                                if (typeof value === 'string') {
-                                    return { stringValue: value as string };
-                                }
-                                return { numberValue: value as number };
-                            }) as PropertyValueInput[],
+                            values: propValues,
                         },
                     ],
                 },
             },
         })
             .then(() => {
-                refetch();
+                analytics.event({
+                    type: isAddMode
+                        ? EventType.ApplyStructuredPropertyEvent
+                        : EventType.UpdateStructuredPropertyOnAssetEvent,
+                    propertyUrn: structuredProperty.urn,
+                    propertyType: structuredProperty.definition.valueType.urn,
+                    assetUrn: urn,
+                    assetType: associatedUrn?.includes('urn:li:schemaField') ? EntityType.SchemaField : entityType,
+                    values: propValues,
+                });
+                if (refetch) {
+                    refetch();
+                } else {
+                    entityRefetch();
+                }
                 message.destroy();
-                message.success('Successfully updated structured property!');
+                message.success(`Successfully ${isAddMode ? 'added' : 'updated'} structured property!`);
                 closeModal();
             })
             .catch((error) => {
@@ -67,7 +99,7 @@ export default function EditStructuredPropertyModal({ isOpen, propertyRow, struc
 
     return (
         <Modal
-            title={propertyRow.displayName}
+            title={`${isAddMode ? 'Add property' : 'Edit property'} ${structuredProperty?.definition?.displayName}`}
             onCancel={closeModal}
             open={isOpen}
             width={650}
@@ -76,14 +108,19 @@ export default function EditStructuredPropertyModal({ isOpen, propertyRow, struc
                     <Button onClick={closeModal} type="text">
                         Cancel
                     </Button>
-                    <Button type="primary" onClick={upsertProperties} disabled={!selectedValues.length}>
-                        Update
+                    <Button
+                        type="primary"
+                        onClick={upsertProperties}
+                        disabled={!selectedValues.length}
+                        data-testid="add-update-structured-prop-on-entity-button"
+                    >
+                        {isAddMode ? 'Add' : 'Update'}
                     </Button>
                 </>
             }
             destroyOnClose
         >
-            {structuredProperty?.definition.description && (
+            {structuredProperty?.definition?.description && (
                 <Description>{structuredProperty.definition.description}</Description>
             )}
             <StructuredPropertyInput

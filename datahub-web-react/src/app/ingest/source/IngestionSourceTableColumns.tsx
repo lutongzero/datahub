@@ -1,6 +1,7 @@
 import { blue } from '@ant-design/colors';
 import { CodeOutlined, CopyOutlined, DeleteOutlined } from '@ant-design/icons';
-import { Button, Image, Tooltip, Typography } from 'antd';
+import { Button, Image, Typography } from 'antd';
+import { Tooltip } from '@components';
 import cronstrue from 'cronstrue';
 import React from 'react';
 import styled from 'styled-components/macro';
@@ -106,7 +107,13 @@ export function LastExecutionColumn(time: any) {
 }
 
 export function ScheduleColumn(schedule: any, record: any) {
-    const tooltip = schedule && `Runs ${cronstrue.toString(schedule).toLowerCase()} (${record.timezone})`;
+    let tooltip: string;
+    try {
+        tooltip = schedule && `Runs ${cronstrue.toString(schedule).toLowerCase()} (${record.timezone})`;
+    } catch (e) {
+        tooltip = 'Invalid cron schedule';
+        console.debug('Error parsing cron schedule', e);
+    }
     return (
         <Tooltip title={tooltip || 'Not scheduled'}>
             <Typography.Text code>{schedule || 'None'}</Typography.Text>
@@ -196,7 +203,13 @@ export function ActionsColumn({
                     DETAILS
                 </Button>
             )}
-            <Button data-testid="delete-button" onClick={() => onDelete(record.urn)} type="text" shape="circle" danger>
+            <Button
+                data-testid={`delete-ingestion-source-${record.name}`}
+                onClick={() => onDelete(record.urn)}
+                type="text"
+                shape="circle"
+                danger
+            >
                 <DeleteOutlined />
             </Button>
         </ActionButtonContainer>

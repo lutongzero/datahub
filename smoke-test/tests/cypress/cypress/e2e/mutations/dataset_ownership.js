@@ -1,4 +1,4 @@
-const test_id = Math.floor(Math.random() * 100000);
+const test_id = crypto.getRandomValues(new Uint32Array(1))[0];
 const username = `Example Name ${test_id}`;
 const email = `example${test_id}@example.com`;
 const password = "Example password";
@@ -57,25 +57,25 @@ describe("add, remove ownership for dataset", () => {
     addOwner(
       username,
       "Business Owner",
-      `[href="/user/urn:li:corpuser:example${test_id}@example.com"]`,
+      `[href="/user/urn:li:corpuser:example${test_id}@example.com/owner of"]`,
     );
     // data steward
     addOwner(
       username,
       "Data Steward",
-      `[href="/user/urn:li:corpuser:example${test_id}@example.com"]`,
+      `[href="/user/urn:li:corpuser:example${test_id}@example.com/owner of"]`,
     );
     // none
     addOwner(
       username,
       "None",
-      `[href="/user/urn:li:corpuser:example${test_id}@example.com"]`,
+      `[href="/user/urn:li:corpuser:example${test_id}@example.com/owner of"]`,
     );
     // technical owner
     addOwner(
       username,
       "Technical Owner",
-      `[href="/user/urn:li:corpuser:example${test_id}@example.com"]`,
+      `[href="/user/urn:li:corpuser:example${test_id}@example.com/owner of"]`,
     );
   });
 
@@ -89,21 +89,25 @@ describe("add, remove ownership for dataset", () => {
     addOwner(
       group_name,
       "Business Owner",
-      `[href="/group/urn:li:corpGroup:${test_id}"]`,
+      `[href="/group/urn:li:corpGroup:${test_id}/owner of"]`,
     );
     // data steward
     addOwner(
       group_name,
       "Data Steward",
-      `[href="/group/urn:li:corpGroup:${test_id}"]`,
+      `[href="/group/urn:li:corpGroup:${test_id}/owner of"]`,
     );
     // none
-    addOwner(group_name, "None", `[href="/group/urn:li:corpGroup:${test_id}"]`);
+    addOwner(
+      group_name,
+      "None",
+      `[href="/group/urn:li:corpGroup:${test_id}/owner of"]`,
+    );
     // technical owner
     addOwner(
       group_name,
       "Technical Owner",
-      `[href="/group/urn:li:corpGroup:${test_id}"]`,
+      `[href="/group/urn:li:corpGroup:${test_id}/owner of"]`,
     );
   });
 });

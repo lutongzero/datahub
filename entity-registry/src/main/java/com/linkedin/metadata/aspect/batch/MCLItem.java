@@ -37,6 +37,11 @@ public interface MCLItem extends BatchItem {
     return getMetadataChangeLog().getSystemMetadata();
   }
 
+  @Override
+  default void setSystemMetadata(@Nonnull SystemMetadata systemMetadata) {
+    getMetadataChangeLog().setSystemMetadata(systemMetadata);
+  }
+
   default SystemMetadata getPreviousSystemMetadata() {
     return getMetadataChangeLog().getPreviousSystemMetadata();
   }
@@ -68,5 +73,14 @@ public interface MCLItem extends BatchItem {
   @Override
   default AuditStamp getAuditStamp() {
     return getMetadataChangeLog().getCreated();
+  }
+
+  /**
+   * Change detection for previous and new record template
+   *
+   * @return no change detection
+   */
+  default boolean isNoOp() {
+    return getPreviousRecordTemplate() == getRecordTemplate();
   }
 }

@@ -9,6 +9,7 @@ fragment entityPreview on Entity {
             ...platformFields
         }
         editableProperties {
+            name
             description
         }
         platformNativeType
@@ -156,7 +157,7 @@ fragment entityPreview on Entity {
         }
         health {
             ...entityHealth
-        }    
+        }
     }
     ... on DataFlow {
         urn
@@ -344,5 +345,10 @@ fragment entityPreview on Entity {
     }
     ... on Container {
         ...entityContainer
+    }
+    ... on SupportsVersions {
+        versionProperties {
+            ...versionProperties
+        }
     }
 }

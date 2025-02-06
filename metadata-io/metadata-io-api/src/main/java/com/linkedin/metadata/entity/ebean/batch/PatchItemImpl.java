@@ -10,9 +10,11 @@ import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.linkedin.common.AuditStamp;
 import com.linkedin.common.urn.Urn;
+import com.linkedin.data.ByteString;
 import com.linkedin.data.template.RecordTemplate;
 import com.linkedin.events.metadata.ChangeType;
 import com.linkedin.metadata.aspect.AspectRetriever;
+import com.linkedin.metadata.aspect.batch.BatchItem;
 import com.linkedin.metadata.aspect.batch.MCPItem;
 import com.linkedin.metadata.aspect.batch.PatchMCP;
 import com.linkedin.metadata.aspect.patch.template.AspectTemplateEngine;
@@ -21,7 +23,9 @@ import com.linkedin.metadata.models.AspectSpec;
 import com.linkedin.metadata.models.EntitySpec;
 import com.linkedin.metadata.models.registry.EntityRegistry;
 import com.linkedin.metadata.utils.EntityKeyUtils;
+import com.linkedin.metadata.utils.GenericRecordUtils;
 import com.linkedin.metadata.utils.SystemMetadataUtils;
+import com.linkedin.mxe.GenericAspect;
 import com.linkedin.mxe.MetadataChangeProposal;
 import com.linkedin.mxe.SystemMetadata;
 import jakarta.json.Json;
@@ -55,7 +59,7 @@ public class PatchItemImpl implements PatchMCP {
   private final Urn urn;
   // aspectName name of the aspect being inserted
   private final String aspectName;
-  private final SystemMetadata systemMetadata;
+  private SystemMetadata systemMetadata;
   private final AuditStamp auditStamp;
 
   private final JsonPatch patch;
@@ -76,6 +80,37 @@ public class PatchItemImpl implements PatchMCP {
   @Override
   public RecordTemplate getRecordTemplate() {
     return null;
+  }
+
+  @Nonnull
+  public MetadataChangeProposal getMetadataChangeProposal() {
+    if (metadataChangeProposal != null) {
+      return metadataChangeProposal;
+    } else {
+      GenericAspect genericAspect = new GenericAspect();
+      genericAspect.setContentType("application/json");
+      genericAspect.setValue(ByteString.copyString(getPatch().toString(), StandardCharsets.UTF_8));
+
+      final MetadataChangeProposal mcp = new MetadataChangeProposal();
+      mcp.setEntityUrn(getUrn());
+      mcp.setChangeType(getChangeType());
+      mcp.setEntityType(getEntitySpec().getName());
+      mcp.setAspectName(getAspectName());
+      mcp.setAspect(genericAspect);
+      mcp.setSystemMetadata(getSystemMetadata());
+      mcp.setEntityKeyAspect(
+          GenericRecordUtils.serializeAspect(
+              EntityKeyUtils.convertUrnToEntityKey(getUrn(), entitySpec.getKeyAspectSpec())));
+      return mcp;
+    }
+  }
+
+  @Override
+  public void setSystemMetadata(@Nonnull SystemMetadata systemMetadata) {
+    this.systemMetadata = systemMetadata;
+    if (this.metadataChangeProposal != null) {
+      this.metadataChangeProposal.setSystemMetadata(systemMetadata);
+    }
   }
 
   public ChangeItemImpl applyPatch(RecordTemplate recordTemplate, AspectRetriever aspectRetriever) {
@@ -177,7 +212,7 @@ public class PatchItemImpl implements PatchMCP {
           .build(entityRegistry);
     }
 
-    private static JsonPatch convertToJsonPatch(MetadataChangeProposal mcp) {
+    public static JsonPatch convertToJsonPatch(MetadataChangeProposal mcp) {
       JsonNode json;
       try {
         return Json.createPatch(
@@ -188,6 +223,11 @@ public class PatchItemImpl implements PatchMCP {
         throw new IllegalArgumentException("Invalid JSON Patch: " + mcp.getAspect().getValue(), e);
       }
     }
+  }
+
+  @Override
+  public boolean isDatabaseDuplicateOf(BatchItem other) {
+    return equals(other);
   }
 
   @Override
@@ -202,12 +242,13 @@ public class PatchItemImpl implements PatchMCP {
     return urn.equals(that.urn)
         && aspectName.equals(that.aspectName)
         && Objects.equals(systemMetadata, that.systemMetadata)
+        && auditStamp.equals(that.auditStamp)
         && patch.equals(that.patch);
   }
 
   @Override
   public int hashCode() {
-    return Objects.hash(urn, aspectName, systemMetadata, patch);
+    return Objects.hash(urn, aspectName, systemMetadata, auditStamp, patch);
   }
 
   @Override

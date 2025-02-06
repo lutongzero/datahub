@@ -7,7 +7,6 @@ import static com.linkedin.metadata.authorization.ApiOperation.READ;
 import static com.linkedin.metadata.utils.PegasusUtils.urnToEntityName;
 
 import com.codahale.metrics.MetricRegistry;
-import com.codahale.metrics.Timer;
 import com.datahub.authentication.Authentication;
 import com.datahub.authentication.AuthenticationContext;
 import com.datahub.authorization.AuthUtil;
@@ -30,6 +29,7 @@ import io.datahubproject.openapi.generated.AspectRowSummary;
 import io.datahubproject.openapi.util.MappingUtil;
 import io.swagger.v3.oas.annotations.Parameter;
 import io.swagger.v3.oas.annotations.tags.Tag;
+import jakarta.servlet.http.HttpServletRequest;
 import java.net.URLDecoder;
 import java.util.Arrays;
 import java.util.Collections;
@@ -55,8 +55,12 @@ import org.springframework.web.bind.annotation.RequestMapping;
 import org.springframework.web.bind.annotation.RequestParam;
 import org.springframework.web.bind.annotation.RestController;
 
+/*
+ Use v2 or v3 controllers instead
+*/
+@Deprecated
 @RestController
-@RequestMapping("/entities/v1")
+@RequestMapping("/openapi/entities/v1")
 @Slf4j
 @Tag(
     name = "Entities",
@@ -86,6 +90,7 @@ public class EntitiesController {
 
   @GetMapping(value = "/latest", produces = MediaType.APPLICATION_JSON_VALUE)
   public ResponseEntity<UrnResponseMap> getEntities(
+      HttpServletRequest request,
       @Parameter(
               name = "urns",
               required = true,
@@ -98,7 +103,7 @@ public class EntitiesController {
           @RequestParam(name = "aspectNames", required = false)
           @Nullable
           String[] aspectNames) {
-    Timer.Context context = MetricUtils.timer("getEntities").time();
+
     final Set<Urn> entityUrns =
         Arrays.stream(urns)
             // Have to decode here because of frontend routing, does No-op for already unencoded
@@ -109,15 +114,13 @@ public class EntitiesController {
     log.debug("GET ENTITIES {}", entityUrns);
     Authentication authentication = AuthenticationContext.getAuthentication();
     String actorUrnStr = authentication.getActor().toUrnStr();
-
-    if (!AuthUtil.isAPIAuthorizedEntityUrns(authentication, _authorizerChain, READ, entityUrns)) {
-      throw new UnauthorizedException(actorUrnStr + " is unauthorized to get entities.");
-    }
     OperationContext opContext =
         OperationContext.asSession(
             systemOperationContext,
             RequestContext.builder()
                 .buildOpenapi(
+                    actorUrnStr,
+                    request,
                     "getEntities",
                     entityUrns.stream()
                         .map(Urn::getEntityType)
@@ -126,6 +129,10 @@ public class EntitiesController {
             _authorizerChain,
             authentication,
             true);
+
+    if (!AuthUtil.isAPIAuthorizedEntityUrns(opContext, READ, entityUrns)) {
+      throw new UnauthorizedException(actorUrnStr + " is unauthorized to get entities.");
+    }
 
     if (entityUrns.size() <= 0) {
       return ResponseEntity.ok(UrnResponseMap.builder().responses(Collections.emptyMap()).build());
@@ -159,12 +166,12 @@ public class EntitiesController {
       } else {
         MetricUtils.counter(MetricRegistry.name("getEntities", "success")).inc();
       }
-      context.stop();
     }
   }
 
   @PostMapping(value = "/", produces = MediaType.APPLICATION_JSON_VALUE)
   public ResponseEntity<List<String>> postEntities(
+      HttpServletRequest request,
       @RequestBody @Nonnull List<UpsertAspectRequest> aspectRequests,
       @RequestParam(required = false, name = "async") Boolean async,
       @RequestParam(required = false, name = "createIfNotExists") Boolean createIfNotExists,
@@ -187,6 +194,8 @@ public class EntitiesController {
             systemOperationContext,
             RequestContext.builder()
                 .buildOpenapi(
+                    actorUrnStr,
+                    request,
                     "postEntities",
                     proposals.stream()
                         .map(MetadataChangeProposal::getEntityType)
@@ -198,9 +207,7 @@ public class EntitiesController {
      Ingest Authorization Checks
     */
     List<Pair<MetadataChangeProposal, Integer>> exceptions =
-        isAPIAuthorized(
-                authentication, _authorizerChain, ENTITY, opContext.getEntityRegistry(), proposals)
-            .stream()
+        isAPIAuthorized(opContext, ENTITY, opContext.getEntityRegistry(), proposals).stream()
             .filter(p -> p.getSecond() != com.linkedin.restli.common.HttpStatus.S_200_OK.getCode())
             .collect(Collectors.toList());
     if (!exceptions.isEmpty()) {
@@ -237,6 +244,7 @@ public class EntitiesController {
 
   @DeleteMapping(value = "/", produces = MediaType.APPLICATION_JSON_VALUE)
   public ResponseEntity<List<RollbackRunResultDto>> deleteEntities(
+      HttpServletRequest request,
       @Parameter(
               name = "urns",
               required = true,
@@ -253,7 +261,7 @@ public class EntitiesController {
           boolean soft,
       @RequestParam(required = false, name = "async") Boolean async) {
     Throwable exceptionally = null;
-    try (Timer.Context context = MetricUtils.timer("deleteEntities").time()) {
+    try {
       Authentication authentication = AuthenticationContext.getAuthentication();
       String actorUrnStr = authentication.getActor().toUrnStr();
 
@@ -265,20 +273,22 @@ public class EntitiesController {
               .map(UrnUtils::getUrn)
               .collect(Collectors.toSet());
 
-      if (!AuthUtil.isAPIAuthorizedEntityUrns(
-          authentication, _authorizerChain, DELETE, entityUrns)) {
-        throw new UnauthorizedException(actorUrnStr + " is unauthorized to delete entities.");
-      }
       OperationContext opContext =
           OperationContext.asSession(
               systemOperationContext,
               RequestContext.builder()
                   .buildOpenapi(
+                      actorUrnStr,
+                      request,
                       "deleteEntities",
                       entityUrns.stream().map(Urn::getEntityType).collect(Collectors.toSet())),
               _authorizerChain,
               authentication,
               true);
+
+      if (!AuthUtil.isAPIAuthorizedEntityUrns(opContext, DELETE, entityUrns)) {
+        throw new UnauthorizedException(actorUrnStr + " is unauthorized to delete entities.");
+      }
 
       if (!soft) {
         return ResponseEntity.ok(

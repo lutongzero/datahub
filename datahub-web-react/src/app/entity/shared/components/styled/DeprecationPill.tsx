@@ -19,8 +19,6 @@ const DeprecatedContainer = styled.div`
     justify-content: center;
     align-items: center;
     color: #cd0d24;
-    margin-left: 0px;
-    margin-right: 8px;
     padding-top: 8px;
     padding-bottom: 8px;
     padding-right: 4px;
@@ -165,8 +163,7 @@ export const DeprecationPill = ({ deprecation, urn, refetch, showUndeprecate }: 
                         <DescriptionContainer>
                             {expanded || !overLimit ? (
                                 <>
-                                    {
-                                        deprecation?.note && deprecation?.note !== '' &&
+                                    {deprecation?.note && deprecation?.note !== '' && (
                                         <>
                                             <StyledViewer content={deprecation.note} readOnly />
                                             <ExpandedActions>
@@ -181,7 +178,7 @@ export const DeprecationPill = ({ deprecation, urn, refetch, showUndeprecate }: 
                                                 )}
                                             </ExpandedActions>
                                         </>
-                                    }
+                                    )}
                                 </>
                             ) : (
                                 <>

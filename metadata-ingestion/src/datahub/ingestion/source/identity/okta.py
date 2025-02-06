@@ -50,6 +50,7 @@ from datahub.metadata.schema_classes import (
     OriginTypeClass,
     StatusClass,
 )
+from datahub.utilities.lossy_collections import LossyList
 
 logger = logging.getLogger(__name__)
 nest_asyncio.apply()
@@ -173,7 +174,7 @@ class OktaConfig(StatefulIngestionConfigBase, ConfigModel):
 
 @dataclass
 class OktaSourceReport(StaleEntityRemovalSourceReport):
-    filtered: List[str] = field(default_factory=list)
+    filtered: LossyList[str] = field(default_factory=LossyList)
 
     def report_filtered(self, name: str) -> None:
         self.filtered.append(name)
@@ -344,9 +345,9 @@ class OktaSource(StatefulIngestionSourceBase):
                 ).as_workunit()
 
         # Step 2: Populate GroupMembership Aspects for CorpUsers
-        datahub_corp_user_urn_to_group_membership: Dict[
-            str, GroupMembershipClass
-        ] = defaultdict(lambda: GroupMembershipClass(groups=[]))
+        datahub_corp_user_urn_to_group_membership: Dict[str, GroupMembershipClass] = (
+            defaultdict(lambda: GroupMembershipClass(groups=[]))
+        )
         if self.config.ingest_group_membership and okta_groups is not None:
             # Fetch membership for each group.
             for okta_group in okta_groups:
@@ -664,9 +665,9 @@ class OktaSource(StatefulIngestionSourceBase):
         full_name = f"{profile.firstName} {profile.lastName}"
         return CorpUserInfoClass(
             active=True,
-            displayName=profile.displayName
-            if profile.displayName is not None
-            else full_name,
+            displayName=(
+                profile.displayName if profile.displayName is not None else full_name
+            ),
             firstName=profile.firstName,
             lastName=profile.lastName,
             fullName=full_name,
